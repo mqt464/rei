@@ -1,6 +1,8 @@
 import { DatabaseSync } from 'node:sqlite'
 import { EventEmitter } from 'node:events'
 import type { SearchResult } from '../shared/search'
+import { historyPageSize } from '../shared/history'
+import type { HistoryPage, HistoryQuery, HistoryRemoval, HistoryVisit } from '../shared/history'
 
 export interface HistoryEntry {
   url: string
@@ -73,8 +75,12 @@ export class SearchStore extends EventEmitter {
     super()
     this.database = new DatabaseSync(filename)
     try {
+      this.database.function('history_lower', { deterministic: true }, (value) =>
+        typeof value === 'string' ? value.toLowerCase() : ''
+      )
       const version = this.database.prepare('PRAGMA user_version').get()?.user_version
-      if (version !== 0 && version !== 1) throw new Error('Unsupported search database version.')
+      if (version !== 0 && version !== 1 && version !== 2)
+        throw new Error('Unsupported search database version.')
       this.database.exec(`
         PRAGMA journal_mode = WAL;
         PRAGMA busy_timeout = 3000;
@@ -104,8 +110,27 @@ export class SearchStore extends EventEmitter {
           accessed_at INTEGER NOT NULL,
           PRIMARY KEY(provider, query)
         );
-        PRAGMA user_version = 1;
       `)
+      this.database.exec(`
+        CREATE TABLE IF NOT EXISTS history_visits (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          url TEXT NOT NULL,
+          visited_at INTEGER NOT NULL,
+          visit_count INTEGER NOT NULL DEFAULT 1,
+          typed_visits INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS history_visits_recency ON history_visits(visited_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS history_visits_url ON history_visits(url);
+      `)
+      if (version !== 2) {
+        this.database.exec(`
+          BEGIN IMMEDIATE;
+          INSERT INTO history_visits(url, visited_at, visit_count, typed_visits)
+            SELECT url, last_visit, visits, typed_visits FROM history;
+          PRAGMA user_version = 2;
+          COMMIT;
+        `)
+      }
       this.prune()
     } catch (error) {
       this.database.close()
@@ -130,6 +155,14 @@ export class SearchStore extends EventEmitter {
       'DELETE FROM history WHERE url IN (SELECT url FROM history ORDER BY last_visit DESC LIMIT -1 OFFSET 5000)'
     )
     this.database
+      .prepare(
+        'DELETE FROM history_visits WHERE visited_at < ? OR url NOT IN (SELECT url FROM history)'
+      )
+      .run(cutoff)
+    this.database.exec(
+      'DELETE FROM history_visits WHERE id IN (SELECT id FROM history_visits ORDER BY visited_at DESC, id DESC LIMIT -1 OFFSET 50000)'
+    )
+    this.database
       .prepare('DELETE FROM choices WHERE last_used < ? OR url NOT IN (SELECT url FROM history)')
       .run(cutoff)
     this.database.exec(
@@ -145,9 +178,12 @@ export class SearchStore extends EventEmitter {
     const address = webUrl(url)
     if (!address) return
     this.attempt(() => {
-      this.database
-        .prepare(
-          `
+      const now = Date.now()
+      this.database.exec('BEGIN IMMEDIATE')
+      try {
+        this.database
+          .prepare(
+            `
         INSERT INTO history(url, title, favicon, typed_visits, last_visit) VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(url) DO UPDATE SET
           title = excluded.title, favicon = excluded.favicon,
@@ -155,15 +191,24 @@ export class SearchStore extends EventEmitter {
           typed_visits = history.typed_visits + excluded.typed_visits,
           last_visit = excluded.last_visit
       `
-        )
-        .run(
-          address,
-          title.slice(0, 512),
-          favicon ? (webUrl(favicon) ?? null) : null,
-          Number(typed),
-          Date.now()
-        )
+          )
+          .run(
+            address,
+            title.slice(0, 512),
+            favicon ? (webUrl(favicon) ?? null) : null,
+            Number(typed),
+            now
+          )
+        this.database
+          .prepare('INSERT INTO history_visits(url, visited_at, typed_visits) VALUES (?, ?, ?)')
+          .run(address, now, Number(typed))
+        this.database.exec('COMMIT')
+      } catch (error) {
+        this.database.exec('ROLLBACK')
+        throw error
+      }
       this.prune()
+      this.emit('history-changed')
     }, undefined)
   }
 
@@ -174,6 +219,7 @@ export class SearchStore extends EventEmitter {
       this.database
         .prepare('UPDATE history SET title = ?, favicon = ? WHERE url = ?')
         .run(title.slice(0, 512), favicon ? (webUrl(favicon) ?? null) : null, address)
+      this.emit('history-changed')
     }, undefined)
   }
 
@@ -212,6 +258,70 @@ export class SearchStore extends EventEmitter {
           .all(query.trim().toLowerCase(), Date.now() - 90 * 86400000) as unknown as HistoryEntry[],
       []
     )
+  }
+
+  historyPage(filter: HistoryQuery): HistoryPage {
+    const condition = `v.visited_at >= ? AND v.visited_at < ?
+      AND (instr(history_lower(h.title), ?) > 0 OR instr(history_lower(h.url), ?) > 0)
+      AND (? = '' OR lower(h.url) LIKE ? ESCAPE '\\')`
+    const query = filter.query.trim().toLowerCase()
+    const host = filter.host.toLowerCase().replace(/[\\%_]/g, '\\$&')
+    const parameters = [filter.start, filter.end, query, query, host, `%://${host}/%`]
+    const total = this.database
+      .prepare(
+        `SELECT COUNT(*) AS total FROM history_visits v JOIN history h ON h.url = v.url WHERE ${condition}`
+      )
+      .get(...parameters)!.total as number
+    const visits = this.database
+      .prepare(
+        `SELECT v.id, h.url, h.title, h.favicon, v.visited_at AS visitedAt
+      FROM history_visits v JOIN history h ON h.url = v.url WHERE ${condition}
+      ORDER BY v.visited_at DESC, v.id DESC LIMIT ? OFFSET ?`
+      )
+      .all(...parameters, historyPageSize, filter.offset) as unknown as HistoryVisit[]
+    return { visits, total }
+  }
+
+  historyVisit(id: number): HistoryVisit | undefined {
+    return this.database
+      .prepare(
+        `SELECT v.id, h.url, h.title, h.favicon, v.visited_at AS visitedAt
+      FROM history_visits v JOIN history h ON h.url = v.url WHERE v.id = ?`
+      )
+      .get(id) as unknown as HistoryVisit | undefined
+  }
+
+  removeHistory(removal: HistoryRemoval): void {
+    this.database.exec('BEGIN IMMEDIATE')
+    try {
+      if (removal.ids) {
+        this.database
+          .prepare(
+            `DELETE FROM history_visits WHERE id IN (${removal.ids.map(() => '?').join(',')})`
+          )
+          .run(...removal.ids)
+      } else {
+        this.database
+          .prepare('DELETE FROM history_visits WHERE visited_at >= ? AND visited_at < ?')
+          .run(removal.start!, removal.end!)
+      }
+      this.database.exec(`
+        DELETE FROM history WHERE url NOT IN (SELECT url FROM history_visits);
+        UPDATE history SET
+          last_visit = (SELECT MAX(visited_at) FROM history_visits WHERE url = history.url),
+          visits = (SELECT SUM(visit_count) FROM history_visits WHERE url = history.url),
+          typed_visits = (SELECT SUM(typed_visits) FROM history_visits WHERE url = history.url);
+        DELETE FROM choices WHERE url NOT IN (SELECT url FROM history);
+        COMMIT;
+      `)
+    } catch (error) {
+      this.database.exec('ROLLBACK')
+      throw error
+    }
+    this.database.exec('PRAGMA wal_checkpoint(TRUNCATE)')
+    this.generation += 1
+    this.emit('cleared')
+    this.emit('history-changed')
   }
 
   cached(provider: SearchProvider, query: string): SearchResult[] | undefined {
@@ -275,7 +385,7 @@ export class SearchStore extends EventEmitter {
       this.database.exec('BEGIN IMMEDIATE')
       try {
         this.database.exec(
-          'DELETE FROM choices; DELETE FROM history; DELETE FROM provider_cache; COMMIT;'
+          'DELETE FROM choices; DELETE FROM history_visits; DELETE FROM history; DELETE FROM provider_cache; COMMIT;'
         )
       } catch (error) {
         this.database.exec('ROLLBACK')
@@ -285,6 +395,7 @@ export class SearchStore extends EventEmitter {
       this.warning = undefined
       this.generation += 1
       this.emit('cleared')
+      this.emit('history-changed')
       return true
     }, false)
   }

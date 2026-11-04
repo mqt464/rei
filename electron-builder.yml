@@ -1,10 +1,21 @@
-appId: com.electron.app
+appId: io.github.mqt464.rei
 productName: rei
 directories:
   buildResources: build
+extraResources:
+  - from: resources/commands
+    to: commands
+  - from: resources/extensions
+    to: extensions
+  - from: resources/sources
+    to: sources
 files:
+  - '!resources/commands/**'
+  - '!resources/extensions/**'
+  - '!resources/sources/**'
   - '!**/.vscode/*'
   - '!src/*'
+  - '!docs/**'
   - '!electron.vite.config.{js,ts,mjs,cjs}'
   - '!svelte.config.mjs'
   - '!{.eslintcache,eslint.config.mjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
@@ -14,12 +25,17 @@ asarUnpack:
   - resources/**
 win:
   executableName: rei
+  icon: build/icon.ico
 nsis:
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
+  installerHeaderIcon: build/icon.ico
   artifactName: ${name}-${version}-setup.${ext}
   shortcutName: ${productName}
   uninstallDisplayName: ${productName}
   createDesktopShortcut: always
 mac:
+  icon: build/icon.icns
   entitlementsInherit: build/entitlements.mac.plist
   extendInfo:
     - NSCameraUsageDescription: Application requests access to the device's camera.
@@ -30,15 +46,18 @@ mac:
 dmg:
   artifactName: ${name}-${version}.${ext}
 linux:
+  icon: build/icon.png
   target:
     - AppImage
     - snap
     - deb
-  maintainer: electronjs.org
+  maintainer: n/a
   category: Utility
 appImage:
   artifactName: ${name}-${version}.${ext}
 npmRebuild: false
 publish:
-  provider: generic
-  url: https://example.com/auto-updates
+  provider: github
+  owner: mqt464
+  repo: rei
+  releaseType: draft

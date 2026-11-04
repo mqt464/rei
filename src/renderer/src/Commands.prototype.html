@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Rei Commands — throwaway UI prototype</title>
+    <link rel="stylesheet" href="assets/base.css" />
+    <link rel="stylesheet" href="components/ui/ui.css" />
+    <style>
+      body {
+        font-size: var(--rei-font-size);
+        padding-bottom: 100px;
+      }
+      main {
+        display: grid;
+        grid-template-columns: 144px minmax(0, 680px);
+        gap: 24px;
+        max-width: 848px;
+        margin: 32px auto;
+        padding: 0 16px;
+      }
+      nav {
+        display: grid;
+        align-content: start;
+        gap: 3px;
+        color: var(--rei-muted);
+      }
+      nav span {
+        padding: 7px 9px;
+      }
+      nav [aria-current] {
+        color: var(--rei-text);
+        background: var(--rei-selection);
+        border-radius: 6px;
+      }
+      h1 {
+        margin: 0 0 22px;
+        font-size: 20px;
+        font-weight: 600;
+      }
+      h2 {
+        font-size: inherit;
+        font-weight: 600;
+      }
+      p,
+      small {
+        color: var(--rei-muted);
+        line-height: 1.6;
+      }
+      .toolbar {
+        display: flex;
+        align-items: start;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-bottom: 16px;
+      }
+      .toolbar p {
+        max-width: 38ch;
+      }
+      button {
+        font: inherit;
+        cursor: pointer;
+        touch-action: manipulation;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 20px;
+        padding: 15px;
+      }
+      .row + .row,
+      .access {
+        border-top: 1px solid var(--rei-border);
+      }
+      .copy {
+        flex: 1;
+        min-width: 0;
+        overflow-wrap: anywhere;
+      }
+      .copy p {
+        margin-top: 4px;
+      }
+      code {
+        font-family: monospace;
+      }
+      .meta {
+        display: flex;
+        gap: 8px;
+        margin-top: 8px;
+        color: var(--rei-muted);
+      }
+      .meta code {
+        color: var(--rei-text);
+      }
+      summary {
+        padding: 12px 15px;
+        cursor: pointer;
+      }
+      summary small {
+        margin-left: 8px;
+      }
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        padding: 12px 15px;
+        border-top: 1px solid var(--rei-border);
+      }
+      .inspector {
+        display: grid;
+        grid-template-columns: 180px minmax(0, 1fr);
+      }
+      .command-list {
+        padding: 10px;
+        border-right: 1px solid var(--rei-border);
+      }
+      .command-list button {
+        display: grid;
+        gap: 5px;
+        width: 100%;
+        padding: 12px;
+        border: 0;
+        border-radius: 5px;
+        color: var(--rei-text);
+        background: var(--rei-selection);
+        text-align: left;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        text-align: left;
+      }
+      th,
+      td {
+        padding: 12px 15px;
+        border-bottom: 1px solid var(--rei-border);
+      }
+      th {
+        font-weight: 600;
+        color: var(--rei-muted);
+      }
+      .prototype-bar {
+        position: fixed;
+        bottom: 16px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 8px;
+        border: 1px solid var(--rei-border);
+        border-radius: 10px;
+        background: var(--rei-selection);
+        white-space: nowrap;
+      }
+      pre {
+        margin-top: 22px;
+        color: var(--rei-muted);
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        font: 11px/1.6 monospace;
+      }
+      :focus-visible {
+        outline: 2px solid var(--rei-focus);
+        outline-offset: 3px;
+      }
+      @media (max-width: 650px) {
+        main {
+          grid-template-columns: 1fr;
+        }
+        nav {
+          display: none;
+        }
+        .inspector {
+          grid-template-columns: 1fr;
+        }
+        .command-list {
+          border-right: 0;
+          border-bottom: 1px solid var(--rei-border);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <nav aria-label="Settings pages">
+        <span>Appearance</span><span>Wallpaper</span><span>Caret</span><span>Motion</span
+        ><span>Browsing</span><span>Performance</span><span>Search</span><span>Site search</span
+        ><span>Keybinds</span><span aria-current="page">Commands</span><span>Downloads</span
+        ><span>Extensions</span><span>Privacy</span>
+      </nav>
+      <section aria-labelledby="heading">
+        <h1 id="heading">Commands</h1>
+        <div class="toolbar">
+          <p>Local additions to your address bar. You decide what each command can access.</p>
+          <button type="button" class="rei-button" id="folder">Open commands folder</button>
+        </div>
+        <div id="variant"></div>
+        <p id="feedback" role="status"></p>
+        <pre id="state" aria-label="Prototype state"></pre>
+      </section>
+    </main>
+    <div class="prototype-bar" aria-label="Prototype variations">
+      <button type="button" class="rei-button" id="previous" aria-label="Previous variant">←</button
+      ><span id="variant-label"></span
+      ><button type="button" class="rei-button" id="next" aria-label="Next variant">→</button>
+    </div>
+    <script>
+      const variants = ['A', 'B', 'C']
+      const labels = { A: 'Inline access', B: 'Command inspector', C: 'Compact table' }
+      const state = {
+        enabled: false,
+        grants: { 'activeTab.media': false, 'downloads.enqueue': false },
+        removed: false
+      }
+      let variant = new URLSearchParams(location.search).get('variant') || 'A'
+      if (!variants.includes(variant)) variant = 'A'
+      const toggle = (key, checked, label) =>
+        `<button type="button" class="rei-switch ${checked ? 'enabled' : ''}" role="switch" aria-checked="${checked}" aria-label="${label}" data-toggle="${key}"><span></span></button>`
+      const heading = () =>
+        `<div class="row"><div class="copy"><h2>Download <small>v1.0.0</small></h2><p>Download media playing in the active tab.</p><div class="meta"><code>/download</code><span>·</span><span>${!state.enabled ? 'Disabled' : Object.values(state.grants).every(Boolean) ? 'Enabled' : 'Needs access'}</span></div></div>${toggle('enabled', state.enabled, 'Enable Download')}</div>`
+      const access = () =>
+        `<div class="access">${Object.entries(state.grants)
+          .map(
+            ([key, allowed]) =>
+              `<div class="row"><div class="copy"><h2>${key === 'activeTab.media' ? 'Read playing media' : 'Download media'}</h2><p>${key === 'activeTab.media' ? 'Identify the video or audio you are playing.' : 'Save that media to your download folder.'}</p><small><code>${key}</code></small></div>${toggle(key, allowed, `Allow ${key}`)}</div>`
+          )
+          .join('')}</div>`
+      const actions = () =>
+        '<div class="actions"><button type="button" class="rei-button" data-action="show">Show file</button><button type="button" class="rei-button" data-action="remove">Remove</button></div>'
+      function render() {
+        let html =
+          '<div class="rei-card"><div class="row"><div class="copy"><h2>No commands installed</h2><p>Prototype only. Reload to restore fixture.</p></div></div></div>'
+        if (!state.removed) {
+          if (variant === 'A')
+            html = `<div class="rei-card">${heading()}<details open><summary>Access <small>${Object.values(state.grants).filter(Boolean).length} of 2 allowed</small></summary>${access()}</details>${actions()}</div>`
+          if (variant === 'B')
+            html = `<div class="rei-card inspector"><div class="command-list"><button type="button"><strong>Download</strong><small>/download</small></button></div><div>${heading()}${access()}${actions()}</div></div>`
+          if (variant === 'C')
+            html = `<div class="rei-card"><table><thead><tr><th>Command</th><th>Version</th><th>Enabled</th></tr></thead><tbody><tr><td><h2>Download</h2><code>/download</code></td><td>1.0.0</td><td>${toggle('enabled', state.enabled, 'Enable Download')}</td></tr></tbody></table><details><summary>Download access and files</summary>${access()}${actions()}</details></div>`
+        }
+        document.getElementById('variant').innerHTML = html
+        document.getElementById('variant-label').textContent = `${variant} · ${labels[variant]}`
+        document.getElementById('state').textContent =
+          'THROWAWAY PROTOTYPE · No file or permission changes\n' +
+          JSON.stringify(
+            { question: 'How should Commands fit existing Settings?', variant, ...state },
+            null,
+            2
+          )
+      }
+      function cycle(direction) {
+        variant =
+          variants[(variants.indexOf(variant) + direction + variants.length) % variants.length]
+        const url = new URL(location.href)
+        url.searchParams.set('variant', variant)
+        history.replaceState(null, '', url)
+        render()
+      }
+      document.getElementById('previous').onclick = () => cycle(-1)
+      document.getElementById('next').onclick = () => cycle(1)
+      document.getElementById('folder').onclick = () => {
+        document.getElementById('feedback').textContent =
+          'Prototype only. Production opens your commands folder.'
+      }
+      document.getElementById('variant').onclick = (event) => {
+        const target = event.target.closest('button')
+        if (!target) return
+        const key = target.dataset.toggle
+        if (key === 'enabled') state.enabled = !state.enabled
+        else if (key) state.grants[key] = !state.grants[key]
+        if (target.dataset.action === 'remove') state.removed = true
+        if (target.dataset.action === 'show')
+          document.getElementById('feedback').textContent =
+            'Prototype only. Production reveals download.ts.'
+        render()
+      }
+      window.addEventListener('keydown', (event) => {
+        if (event.target.closest('input, textarea, select, [contenteditable]')) return
+        if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+        event.preventDefault()
+        cycle(event.key === 'ArrowRight' ? 1 : -1)
+      })
+      render()
+    </script>
+  </body>
+</html>

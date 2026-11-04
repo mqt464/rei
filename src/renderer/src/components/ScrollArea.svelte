@@ -10,6 +10,16 @@
   let visible = false
   let hideTimer: ReturnType<typeof setTimeout>
 
+  export function reveal(element: HTMLElement | null): void {
+    if (!area || !element || !area.contains(element)) return
+    const bounds = area.getBoundingClientRect()
+    const target = element.getBoundingClientRect()
+    const top = bounds.top + area.clientTop
+    const bottom = top + area.clientHeight
+    if (target.top < top) area.scrollTop -= top - target.top
+    else if (target.bottom > bottom) area.scrollTop += target.bottom - bottom
+  }
+
   function syncEdges(): void {
     if (!area) return
     atTop = area.scrollTop <= 1
@@ -34,6 +44,7 @@
 </script>
 
 <div
+  role="group"
   class={`scroll-frame ${className}`}
   class:at-top={atTop}
   class:at-bottom={atBottom}
@@ -42,7 +53,14 @@
   on:mouseenter={showScrollbar}
   on:mouseleave={() => (hideTimer = setTimeout(() => (visible = false), 2000))}
 >
-  <div bind:this={area} class="scroll-area" on:scroll={() => { syncEdges(); showScrollbar() }}>
+  <div
+    bind:this={area}
+    class="scroll-area"
+    on:scroll={() => {
+      syncEdges()
+      showScrollbar()
+    }}
+  >
     <slot />
   </div>
 </div>
@@ -63,18 +81,18 @@
     content: '';
     opacity: 1;
     pointer-events: none;
-    transition: opacity 180ms ease;
+    transition: opacity var(--rei-duration-medium) ease;
   }
 
   .scroll-frame::before {
     top: 0;
-    height: 24px;
+    height: var(--rei-edge-fade-top, 24px);
     background: linear-gradient(var(--scroll-area-background), transparent);
   }
 
   .scroll-frame::after {
     bottom: 0;
-    height: 44px;
+    height: var(--rei-edge-fade-bottom, 44px);
     background: linear-gradient(transparent, var(--scroll-area-background));
   }
 
@@ -87,19 +105,13 @@
     width: 100%;
     height: 100%;
     overflow: auto;
-    scrollbar-width: thin;
-    scrollbar-color: transparent transparent;
+    scrollbar-width: auto;
     scrollbar-gutter: auto;
-    transition: scrollbar-color 240ms ease;
-  }
-
-  .scrollbar-visible .scroll-area {
-    scrollbar-color: rgb(69 69 75 / 85%) transparent;
   }
 
   .scroll-area::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
+    width: var(--rei-scrollbar-width, 6px);
+    height: var(--rei-scrollbar-width, 6px);
   }
 
   .scroll-area::-webkit-scrollbar-track {
@@ -114,14 +126,15 @@
 
   .scroll-area::-webkit-scrollbar-thumb {
     border: 1px solid transparent;
-    border-radius: 999px;
-    background: rgb(69 69 75 / 0%);
+    border-radius: calc(var(--rei-radius) * 99.9);
+    background: transparent;
     background-clip: padding-box;
-    transition: background-color 240ms ease;
+    transition: background-color var(--rei-duration-slow) ease;
   }
 
-  .scrollbar-visible .scroll-area::-webkit-scrollbar-thumb {
-    background-color: rgb(69 69 75 / 85%);
+  .scrollbar-visible .scroll-area::-webkit-scrollbar-thumb,
+  :global([data-scrollbars='always']) .scroll-area::-webkit-scrollbar-thumb {
+    background-color: color-mix(in srgb, var(--rei-scrollbar, var(--rei-muted)) 60%, transparent);
   }
 
   @media (prefers-reduced-motion: reduce) {

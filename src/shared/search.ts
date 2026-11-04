@@ -1,4 +1,6 @@
 import { resolveAddress } from './navigation'
+import { searchEngines } from './preferences'
+import type { Preferences } from './preferences'
 
 export const searchModes = [
   { id: 'all', label: 'All' },
@@ -38,6 +40,39 @@ export const defaultShortcuts: SearchShortcut[] = [
     url: 'https://en.wikipedia.org/w/index.php?search={query}'
   }
 ]
+
+export function parseShortcuts(value: unknown): SearchShortcut[] {
+  if (!Array.isArray(value) || value.length > 30) throw new Error('Use an array of up to 30 sites.')
+  const keywords = new Set<string>()
+  return value.map((entry) => {
+    if (
+      !entry ||
+      typeof entry !== 'object' ||
+      typeof entry.keyword !== 'string' ||
+      typeof entry.title !== 'string' ||
+      typeof entry.url !== 'string'
+    )
+      throw new Error('Each site needs a keyword, title and URL.')
+    const keyword = entry.keyword.trim()
+    const title = entry.title.trim()
+    const url = entry.url.trim()
+    if (!/^[a-z0-9_-]{1,20}$/.test(keyword) || keywords.has(keyword))
+      throw new Error(
+        'Use unique keywords of 1-20 lowercase letters, numbers, hyphens or underscores.'
+      )
+    if (!title || title.length > 80) throw new Error('Site titles must be 1-80 characters.')
+    let validUrl: boolean
+    try {
+      validUrl = ['https:', 'http:'].includes(new URL(url).protocol)
+    } catch {
+      validUrl = false
+    }
+    if (!validUrl || url.length > 2048 || !url.includes('{query}'))
+      throw new Error('Use an HTTP(S) search URL containing {query}, up to 2048 characters.')
+    keywords.add(keyword)
+    return { keyword, title, url }
+  })
+}
 
 export function shortcutResult(
   query: string,
@@ -261,7 +296,11 @@ export interface SearchResponse {
   warning?: string
 }
 
-export function localSearchResults(query: string, mode: SearchMode): SearchResult[] {
+export function localSearchResults(
+  query: string,
+  mode: SearchMode,
+  engine: Preferences['searchEngine'] = 'google'
+): SearchResult[] {
   query = query.trim()
   if (!query || mode === 'tabs' || mode === 'history') return []
   try {
@@ -270,7 +309,14 @@ export function localSearchResults(query: string, mode: SearchMode): SearchResul
       return [{ id: `website:${url}`, kind: 'website', title: `Open ${url}`, url }]
     }
     if (mode === 'websites') return []
-    return [{ id: `search:${query}`, kind: 'search', title: `Search Google for "${query}"`, query }]
+    return [
+      {
+        id: `search:${query}`,
+        kind: 'search',
+        title: `Search ${searchEngines[engine].label} for "${query}"`,
+        query
+      }
+    ]
   } catch {
     return []
   }

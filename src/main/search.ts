@@ -11,6 +11,7 @@ import type { BrowserTab } from '../shared/browser'
 import type { SearchStore } from './search-store'
 import { getSuggestions } from './suggestions'
 import { getWebsites } from './websites'
+import { currentPreferences } from './preferences'
 
 export class SearchService {
   shortcuts: SearchShortcut[] = defaultShortcuts
@@ -18,15 +19,18 @@ export class SearchService {
   constructor(private store: SearchStore) {}
 
   visit(tab: BrowserTab, typed = false): void {
-    if (!tab.error) this.store.visit(tab.url, tab.title || tab.url, tab.favicon, typed)
+    if (!tab.incognito && !tab.error && currentPreferences().historyEnabled)
+      this.store.visit(tab.url, tab.title || tab.url, tab.favicon, typed)
   }
 
   metadata(tab: BrowserTab): void {
-    if (!tab.error) this.store.metadata(tab.url, tab.title || tab.url, tab.favicon)
+    if (!tab.incognito && !tab.error && currentPreferences().historyEnabled)
+      this.store.metadata(tab.url, tab.title || tab.url, tab.favicon)
   }
 
   select(result: SearchResult, query: string): void {
-    if (result.kind !== 'search') this.store.select(query, result.url)
+    if (result.kind !== 'search' && currentPreferences().historyEnabled)
+      this.store.select(query, result.url)
   }
 
   async search(
@@ -35,10 +39,12 @@ export class SearchService {
     signal: AbortSignal,
     tabs: BrowserTab[],
     online: boolean,
-    update: (response: SearchResponse, pending: boolean) => void
+    update: (response: SearchResponse, pending: boolean) => void,
+    incognito = false
   ): Promise<SearchResponse> {
     if (signal.aborted) return { results: [] }
     query = query.trim()
+    if (query.startsWith('/')) return { results: [] }
     const shortcut = shortcutResult(query, this.shortcuts)
     if (!query || (shortcut && mode !== 'tabs' && mode !== 'history')) {
       const response = { results: shortcut ? [shortcut] : [] }
@@ -47,8 +53,8 @@ export class SearchService {
     }
     const generation = this.store.generation
     const cancelled = (): boolean => signal.aborted || generation !== this.store.generation
-    const local = localSearchResults(query, mode)
-    const history = mode === 'search' ? [] : this.store.history(query)
+    const local = localSearchResults(query, mode, currentPreferences().searchEngine)
+    const history = incognito || mode === 'search' ? [] : this.store.history(query)
     const known = new Map(history.map((entry) => [entry.url, entry]))
     if (mode === 'all' || mode === 'tabs') {
       for (const tab of tabs) {
@@ -105,7 +111,7 @@ export class SearchService {
     } catch {
       eligible = false
     }
-    if (!provider || !eligible) {
+    if (incognito || !provider || !eligible) {
       update(response(), false)
       return response()
     }

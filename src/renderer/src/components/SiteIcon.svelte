@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { Globe } from '@lucide/svelte'
+  import { Download, Globe, Settings } from '@lucide/svelte'
+  import { downloadsUrl, isInternalUrl, isSettingsUrl } from '../../../shared/navigation'
   import { onDestroy } from 'svelte'
   export let src: string | undefined = undefined
   export let url: string | undefined = undefined
@@ -16,6 +17,7 @@
   ): Promise<void> {
     const request = ++version
     image = undefined
+    if (isInternalUrl(address)) return
     if (!source && address) {
       try {
         source = new URL('/favicon.ico', address).href
@@ -34,7 +36,11 @@
 </script>
 
 <span class="site-icon" aria-hidden="true">
-  {#if image}
+  {#if url === downloadsUrl}
+    <Download size={16} />
+  {:else if isSettingsUrl(url)}
+    <Settings size={16} />
+  {:else if image}
     <img src={image} alt="" referrerpolicy="no-referrer" on:error={() => (image = undefined)} />
   {:else}
     <Globe size={16} />

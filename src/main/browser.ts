@@ -1,18 +1,86 @@
-import { dialog, ipcMain, View, WebContentsView } from 'electron'
+import {
+  app,
+  clipboard,
+  dialog,
+  ipcMain,
+  nativeTheme,
+  screen,
+  session,
+  systemPreferences,
+  View,
+  WebContentsView
+} from 'electron'
 import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { BrowserContextMenu } from './context-menu'
+import { PageFinder } from './find-in-page'
 import type { BaseWindow, IpcMainEvent, IpcMainInvokeEvent, WebContents } from 'electron'
 import type { BrowserState, BrowserTab } from '../shared/browser'
-import { resolveAddress } from '../shared/navigation'
+import {
+  downloadsUrl,
+  historyUrl,
+  isInternalUrl,
+  isSettingsUrl,
+  resolveAddress,
+  settingsUrl
+} from '../shared/navigation'
+import { registerDownloads } from './downloads'
+import { commandsRuntime } from './commands'
+import { registerPlayingMedia } from './playing-media'
 import { SearchService } from './search'
 import type { SearchStore } from './search-store'
 import { getFavicon } from './favicons'
+import { currentTheme, registerTheme } from './theme'
+import { registerSiteSearch } from './site-search'
+import {
+  currentPreferences,
+  hasActiveDownload,
+  registerPreferences,
+  registerSessionPreferences
+} from './preferences'
+import { themeColors, themeFonts } from '../shared/theme'
+import { closeSession, saveSession, startupSession } from './session'
+import { freezeTab, thawTab, TabSnapshotStore } from './tab-memory'
+import type { TabSnapshot } from './tab-memory'
+import { searchUrl } from '../shared/preferences'
 import { searchModes } from '../shared/search'
-import type { SearchMode, SearchResponse, SearchShortcut } from '../shared/search'
+import { createKeybindMatcher } from '../shared/keyboard'
+import { parseHistoryQuery, parseHistoryRemoval } from '../shared/history'
+import { uiPartition } from './extensions'
+import type { ExtensionRuntime } from './extensions'
+import { legacyUIStorage } from './ui-storage'
+import {
+  clearPrivateWebsitePermissions,
+  registerWebsitePermissions,
+  registerWebsitePermissionSettings
+} from './website-permissions'
+import type { SearchMode, SearchResponse } from '../shared/search'
 
-export function attachBrowser(window: BaseWindow, store: SearchStore): WebContents {
+interface TabEntry {
+  state: BrowserTab
+  view?: WebContentsView
+  typed: boolean
+  query?: string
+  lastActive: number
+  scroll: [number, number]
+  fontCss?: string
+  zoom?: number
+  transition?: Promise<void>
+  waking?: Promise<void>
+  navigationVersion?: number
+}
+
+export function attachBrowser(
+  window: BaseWindow,
+  store: SearchStore,
+  extensions?: ExtensionRuntime
+): WebContents {
+  const windowId = window.id
   const chrome = new WebContentsView({
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
+      additionalArguments: app.isPackaged ? ['--rei-disable-reload'] : [],
+      partition: uiPartition,
       contextIsolation: true,
       sandbox: false,
       nodeIntegration: false
@@ -21,62 +89,163 @@ export function attachBrowser(window: BaseWindow, store: SearchStore): WebConten
   const sidebar = new WebContentsView({
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
+      partition: uiPartition,
       contextIsolation: true,
       sandbox: false,
       nodeIntegration: false
     }
   })
-  const tabs = new Map<
-    string,
-    { state: BrowserTab; view: WebContentsView; typed: boolean; query?: string }
-  >()
+  const tabs = new Map<string, TabEntry>()
+  const closedTabs: { url: string; index: number }[] = []
+  const snapshots = new TabSnapshotStore()
+  let incognitoPartition: string | undefined
   const search = new SearchService(store)
+  const contextMenu = new BrowserContextMenu(
+    window,
+    chrome.webContents,
+    (destination, disposition) => {
+      if (/^https?:\/\//i.test(destination))
+        newTab(
+          destination,
+          disposition === 'background-tab' ||
+            (disposition === 'default' && currentPreferences().backgroundTabs),
+          undefined,
+          !!tabs.get(activeTabId)?.state.incognito
+        )
+    },
+    keyboard,
+    extensions
+  )
   let activeTabId = ''
+  const finder = new PageFinder(window, chrome.webContents, keyboard)
   let nextTab = 0
   let overlayHeight = 38
+  let pointerNearTopbar = false
   let sidebarVisible = true
+  let sidebarWidth = 208
+  let sidebarAnimation: ReturnType<typeof setInterval> | undefined
   let controlHeld = false
   let suggestionRequest: AbortController | undefined
+  let initializing = true
+  let registeringExtensionTab = false
+  const fontVersions = new WeakMap<WebContents, number>()
+  const sleepChecks = new Set<string>()
+  let websiteTypography = ''
   window.setContentView(new View())
   window.contentView.addChildView(sidebar)
   window.contentView.addChildView(chrome)
 
-  function resize(): void {
+  function resize(animateSidebar = false): void {
     const { width, height } = window.getContentBounds()
-    const sideWidth = sidebarVisible ? (width < 620 ? 150 : 208) : 0
+    if (!sidebarAnimation) sidebarWidth = sidebarVisible ? desiredSidebarWidth() : 0
+    const sideWidth = sidebarWidth
     sidebar.setBounds({ x: 0, y: 0, width: sideWidth, height })
-    for (const tab of tabs.values())
-      tab.view.setBounds({
+    const resizedTabs = animateSidebar
+      ? [tabs.get(activeTabId)].filter((tab) => tab !== undefined)
+      : tabs.values()
+    for (const tab of resizedTabs)
+      tab.view?.setBounds({
         x: sideWidth,
-        y: 38,
+        y: overlayHeight,
         width: Math.max(0, width - sideWidth),
-        height: Math.max(0, height - 38)
+        height: Math.max(0, height - overlayHeight)
       })
     const active = tabs.get(activeTabId)?.state
     chrome.setBounds({
       x: sideWidth,
       y: 0,
       width: Math.max(0, width - sideWidth),
-      height: active?.url && !active.error ? Math.min(height, overlayHeight) : height
+      height:
+        active?.url && !isInternalUrl(active.url) && !active.error
+          ? Math.min(height, overlayHeight)
+          : height
     })
+    finder.resize(sideWidth, overlayHeight)
   }
 
   function publish(): void {
     if (window.isDestroyed()) return
     for (const [id, tab] of tabs)
-      tab.view.setVisible(id === activeTabId && !!tab.state.url && !tab.state.error)
+      tab.view?.setVisible(
+        id === activeTabId && !!tab.state.url && !isInternalUrl(tab.state.url) && !tab.state.error
+      )
     resize()
     const active = tabs.get(activeTabId)?.state
+    finder.sync(`${activeTabId}:${active?.url ?? ''}`)
     const state: BrowserState = {
       url: active?.url ?? '',
       loading: active?.loading ?? false,
       error: active?.error ?? '',
       activeTabId,
+      activeWebContentsId: tabs.get(activeTabId)?.view?.webContents.id,
       controlHeld,
       tabs: [...tabs.values()].map((tab) => ({ ...tab.state }))
     }
     chrome.webContents.send('browser:state', state)
     if (!sidebar.webContents.isDestroyed()) sidebar.webContents.send('browser:state', state)
+    if (!initializing) saveSession(windowId, state.tabs, activeTabId)
+  }
+
+  function desiredSidebarWidth(): number {
+    const theme = currentTheme()
+    return theme.sidebarIconsOnly
+      ? 52
+      : window.getContentBounds().width < 620
+        ? 150
+        : Math.min(theme.sidebarWidth, Math.max(150, window.getContentBounds().width - 280))
+  }
+
+  async function applyWebsiteFont(tab: TabEntry): Promise<void> {
+    if (!tab.view) return
+    const contents = tab.view.webContents
+    if (contents.isDestroyed() || tab.state.sleeping || !/^https?:/.test(tab.state.url)) return
+    const version = (fontVersions.get(contents) ?? 0) + 1
+    fontVersions.set(contents, version)
+    const theme = currentTheme()
+    const css = [
+      theme.webpageFont !== 'website'
+        ? `font-family:${themeFonts[theme.webpageFont].family} !important`
+        : '',
+      theme.webpageFontSize ? `font-size:${theme.webpageFontSize}px !important` : '',
+      theme.webpageLineHeight ? `line-height:${theme.webpageLineHeight / 100} !important` : ''
+    ]
+      .filter(Boolean)
+      .join(';')
+    try {
+      if (tab.fontCss) {
+        const previous = tab.fontCss
+        tab.fontCss = undefined
+        await contents.removeInsertedCSS(previous)
+      }
+      if (version !== fontVersions.get(contents) || contents.isDestroyed()) return
+      if (css) {
+        const key = await contents.insertCSS(
+          `:where(body, body *):not(pre, code, pre *, code *, svg, svg *) { ${css} }`,
+          { cssOrigin: 'user' }
+        )
+        if (version !== fontVersions.get(contents)) await contents.removeInsertedCSS(key)
+        else tab.fontCss = key
+      }
+    } catch {
+      return
+    }
+  }
+
+  function applyAppearance(): void {
+    if (window.isDestroyed()) return
+    resize()
+    const value = currentTheme()
+    const background = themeColors(value, nativeTheme.shouldUseDarkColors).background
+    const typography = JSON.stringify([
+      value.webpageFont,
+      value.webpageFontSize,
+      value.webpageLineHeight
+    ])
+    for (const tab of tabs.values()) {
+      tab.view?.setBackgroundColor(background)
+      if (typography !== websiteTypography) void applyWebsiteFont(tab)
+    }
+    websiteTypography = typography
   }
 
   function focusAddress(): void {
@@ -84,46 +253,180 @@ export function attachBrowser(window: BaseWindow, store: SearchStore): WebConten
     chrome.webContents.send('browser:focus-address')
   }
 
+  function toggleSidebar(): void {
+    if (sidebarAnimation) clearInterval(sidebarAnimation)
+    sidebarVisible = !sidebarVisible
+    const from = sidebarWidth
+    const to = sidebarVisible ? desiredSidebarWidth() : 0
+    const start = Date.now()
+    const theme = currentTheme()
+    const duration =
+      theme.motion !== 'system' || systemPreferences.getAnimationSettings().prefersReducedMotion
+        ? 0
+        : 18000 / theme.animationSpeed
+    if (sidebarVisible) sidebar.setVisible(true)
+    sidebarAnimation = setInterval(() => {
+      const progress = duration ? Math.min(1, (Date.now() - start) / duration) : 1
+      const eased = 1 - (1 - progress) ** 3
+      sidebarWidth = from + (to - from) * eased
+      resize(progress < 1)
+      if (progress === 1) {
+        clearInterval(sidebarAnimation)
+        sidebarAnimation = undefined
+        if (!sidebarVisible) sidebar.setVisible(false)
+      }
+    }, 8)
+  }
+
   function switchTab(id: string, focusPage = true): void {
     if (!tabs.has(id)) return
+    contextMenu.dismiss(false)
+    const previous = tabs.get(activeTabId)
+    if (activeTabId !== id) suggestionRequest?.abort()
+    if (previous) previous.lastActive = Date.now()
     activeTabId = id
+    const selected = tabs.get(id)!
+    selected.lastActive = Date.now()
+    void wakeTab(selected).then(() => {
+      if (selected.view && activeTabId === id && !selected.state.incognito)
+        extensions?.api.selectTab(selected.view.webContents)
+      if (
+        focusPage &&
+        activeTabId === id &&
+        /^https?:/.test(selected.state.url) &&
+        !window.isDestroyed()
+      )
+        selected.view?.webContents.focus()
+    })
     publish()
     if (!focusPage) return
     const tab = tabs.get(id)!
-    if (tab.state.url) tab.view.webContents.focus()
+    if (isInternalUrl(tab.state.url)) {
+      chrome.webContents.focus()
+      chrome.webContents.send('browser:page-focus')
+    } else if (tab.state.url) tab.view?.webContents.focus()
     else focusAddress()
   }
 
+  let capturingKeybind = false
+  chrome.webContents.ipc.on('keybinds:capture', (event, active: unknown) => {
+    if (isTrusted(event) && typeof active === 'boolean') capturingKeybind = active
+    event.returnValue = null
+  })
+  chrome.webContents.on('did-start-loading', () => {
+    capturingKeybind = false
+  })
+
   function keyboard(contents: WebContents): void {
+    const matcher = createKeybindMatcher()
+    let suppressedKey = ''
+    let bindings = currentPreferences().keybindings
+    contents.ipc.on('keybinds:get', (event) => {
+      event.returnValue = currentPreferences().keybindings
+    })
+    contents.on('blur', () => {
+      matcher.reset()
+      if (contents === chrome.webContents) capturingKeybind = false
+    })
     contents.on('before-input-event', (event, input) => {
-      const controlKey = input.key.toLowerCase().startsWith('control') || input.code.startsWith('Control')
-      const held = controlKey ? input.type === 'keyDown' : input.control
-      if (controlHeld !== held) {
-        controlHeld = held
+      if (controlHeld !== input.control) {
+        controlHeld = input.control
         publish()
       }
-      if (input.type !== 'keyDown' || !(input.control || input.meta) || input.alt) return
-      const key = input.key.toLowerCase()
-      if (input.control && /^[1-9]$/.test(key)) {
-        event.preventDefault()
-        const tab = [...tabs.values()][Number(key) - 1]
+      if (input.type !== 'keyDown' || input.isComposing) {
+        if (input.key === suppressedKey) suppressedKey = ''
+        return
+      }
+      if (contents === chrome.webContents && capturingKeybind) {
+        matcher.reset()
+        return
+      }
+      if (bindings !== currentPreferences().keybindings) {
+        bindings = currentPreferences().keybindings
+        matcher.reset()
+      }
+      if (input.isAutoRepeat) {
+        if (input.key === suppressedKey) event.preventDefault()
+        return
+      }
+      const result = matcher.match(input, bindings)
+      suppressedKey = result.consumed ? input.key : ''
+      if (!result.consumed) return
+      const action = result.action
+      if (!action) return
+      contextMenu.dismiss(false)
+      if (/^tab[1-9]$/.test(action)) {
+        const tab = [...tabs.values()][Number(action.slice(3)) - 1]
         if (tab) switchTab(tab.state.id)
         return
       }
-      if (!['t', 'w', 'l', 'tab', 'b'].includes(key)) return
-      event.preventDefault()
-      if (key === 't') newTab()
-      else if (key === 'w') closeTab(activeTabId)
-      else if (key === 'l') focusAddress()
-      else if (key === 'b') {
-        sidebarVisible = !sidebarVisible
-        sidebar.setVisible(sidebarVisible)
-        resize()
-      } else {
+      if (action === 'newTab') newTab()
+      else if (action === 'newIncognitoTab') newTab(undefined, false, undefined, true)
+      else if (action === 'closeTab') closeTab(activeTabId)
+      else if (action === 'reopenTab') {
+        const closed = closedTabs.pop()
+        if (closed) {
+          const targetId = [...tabs.keys()][closed.index]
+          const tab = newTab(closed.url)
+          if (targetId) reorderTab(tab.state.id, targetId)
+        }
+      } else if (action === 'focusAddress') focusAddress()
+      else if (action === 'findInPage') {
+        const tab = tabs.get(activeTabId)
+        const source =
+          tab?.view && !isInternalUrl(tab.state.url) && !tab.state.error
+            ? tab.view.webContents
+            : chrome.webContents
+        void finder.show(source, `${activeTabId}:${tab?.state.url ?? ''}`).then(() => resize())
+      } else if (action === 'toggleSidebar') toggleSidebar()
+      // Default open or close DevTools by F12 in development
+      // and ignore CommandOrControl + R in production.
+      // see https://github.com/alex8088/electron-toolkit/tree/master/packages/utils
+      else if (action === 'devtools') {
+        if (app.isPackaged) return
+        const page = tabs.get(activeTabId)?.view?.webContents
+        ;(page?.isFocused() ? page : chrome.webContents).toggleDevTools()
+      } else if (action === 'downloads') {
+        const existing = [...tabs.values()].find((tab) => tab.state.url === downloadsUrl)
+        if (existing) switchTab(existing.state.id)
+        else newTab(downloadsUrl)
+      } else if (action === 'history') {
+        openHistory()
+      } else if (action === 'settings') {
+        const existing = [...tabs.values()].find((tab) => isSettingsUrl(tab.state.url))
+        if (existing) switchTab(existing.state.id)
+        else newTab(settingsUrl)
+      } else if (action === 'nextTab' || action === 'previousTab') {
         const ids = [...tabs.keys()]
         switchTab(
-          ids[(ids.indexOf(activeTabId) + (input.shift ? -1 : 1) + ids.length) % ids.length]
+          ids[
+            (ids.indexOf(activeTabId) + (action === 'previousTab' ? -1 : 1) + ids.length) %
+              ids.length
+          ]
         )
+      } else {
+        const tab = tabs.get(activeTabId)
+        const page = tab?.view?.webContents
+        if (!tab || !page || !/^https?:/.test(tab.state.url)) return
+        if (action === 'back' && page.navigationHistory.canGoBack()) page.navigationHistory.goBack()
+        else if (action === 'forward' && page.navigationHistory.canGoForward())
+          page.navigationHistory.goForward()
+        else if (action === 'reload') page.reload()
+        else if (action === 'hardReload') page.reloadIgnoringCache()
+        else if (action === 'mute') {
+          tab.state.muted = !tab.state.muted
+          page.setAudioMuted(tab.state.muted)
+          publish()
+        } else if (['zoomIn', 'zoomOut', 'resetZoom'].includes(action)) {
+          tab.zoom =
+            action === 'resetZoom'
+              ? currentPreferences().defaultZoom / 100
+              : Math.max(
+                  0.25,
+                  Math.min(5, page.getZoomFactor() + (action === 'zoomIn' ? 0.1 : -0.1))
+                )
+          page.setZoomFactor(tab.zoom)
+        }
       }
     })
   }
@@ -131,31 +434,120 @@ export function attachBrowser(window: BaseWindow, store: SearchStore): WebConten
   function load(url: string, id = activeTabId, typed = false, query?: string): void {
     const tab = tabs.get(id)
     if (!tab) return
-    tab.typed = typed
-    tab.query = query
-    tab.state.url = url
-    tab.state.title = new URL(url).hostname
-    tab.state.favicon = undefined
-    tab.state.error = ''
-    publish()
-    void tab.view.webContents.loadURL(url).catch(() => {})
+    tab.lastActive = Date.now()
+    const version = (tab.navigationVersion ?? 0) + 1
+    tab.navigationVersion = version
+    void wakeTab(tab, false).then(() => {
+      if (
+        window.isDestroyed() ||
+        tabs.get(id) !== tab ||
+        tab.navigationVersion !== version ||
+        !tab.view
+      )
+        return
+      tab.scroll = [0, 0]
+      tab.typed = typed
+      tab.query = query
+      tab.state.url = url
+      tab.state.title = new URL(url).hostname
+      tab.state.favicon = undefined
+      tab.state.error = ''
+      if (isInternalUrl(url)) {
+        tab.view.webContents.stop()
+        tab.state.title = url === downloadsUrl ? 'Downloads' : 'Settings'
+        tab.state.loading = false
+        tab.typed = false
+        tab.query = undefined
+        publish()
+        void tab.view.webContents.loadURL('about:blank').catch(() => {})
+        return
+      }
+      publish()
+      void tab.view.webContents.loadURL(url).catch(() => {})
+    })
   }
 
-  function newTab(url?: string): void {
+  function newTab(
+    url: string | undefined = undefined,
+    background = false,
+    afterTabId?: string,
+    incognito = false
+  ): TabEntry {
+    url ??= incognito ? '' : currentPreferences().newTabUrl
     const id = String(++nextTab)
-    const view = new WebContentsView({
-      webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true }
-    })
-    const tab: BrowserTab = { id, url: url ?? '', title: 'New tab', loading: false, error: '' }
-    const entry = { state: tab, view, typed: false, query: undefined as string | undefined }
+    const entry: TabEntry = {
+      state: {
+        id,
+        incognito,
+        url: url ?? '',
+        title: incognito ? 'Incognito tab' : 'New tab',
+        loading: false,
+        error: '',
+        sleeping: false,
+        discarded: false
+      },
+      typed: false,
+      lastActive: Date.now(),
+      scroll: [0, 0]
+    }
+    if (afterTabId && tabs.has(afterTabId)) {
+      const entries = [...tabs]
+      tabs.clear()
+      for (const [existingId, existingTab] of entries) {
+        tabs.set(existingId, existingTab)
+        if (existingId === afterTabId) tabs.set(id, entry)
+      }
+    }
     tabs.set(id, entry)
+    createTabView(entry)
+    if (!background) switchTab(id)
+    else publish()
+    if (url) load(url, id)
+    return entry
+  }
+
+  function createTabView(entry: TabEntry): void {
+    const tab = entry.state
+    if (tab.incognito) incognitoPartition ??= `rei-incognito-${randomUUID()}`
+    const view = new WebContentsView({
+      webPreferences: {
+        preload: join(__dirname, '../preload/keyboard.js'),
+        partition: tab.incognito ? incognitoPartition : undefined,
+        nodeIntegration: false,
+        nodeIntegrationInSubFrames: true,
+        contextIsolation: true,
+        sandbox: true
+      }
+    })
+    entry.view = view
+    registerPlayingMedia(view.webContents)
+    entry.fontCss = undefined
+    view.setBackgroundColor(themeColors(currentTheme(), nativeTheme.shouldUseDarkColors).background)
     window.contentView.addChildView(view)
     window.contentView.addChildView(chrome)
     view.setVisible(false)
     const contents = view.webContents
+    registerWebsitePermissions(contents, window, !!tab.incognito)
+    registerSessionPreferences(contents.session, !!tab.incognito)
+    if (extensions && !tab.incognito) {
+      registeringExtensionTab = true
+      try {
+        extensions.api.addTab(contents, window)
+        const selected = tabs.get(activeTabId)?.view
+        if (selected && !tabs.get(activeTabId)?.state.incognito)
+          extensions.api.selectTab(selected.webContents)
+      } finally {
+        registeringExtensionTab = false
+      }
+    }
+    contents.on('context-menu', (_event, params) => {
+      void contextMenu.show(contents, params, !!tab.incognito)
+    })
+    contents.setZoomFactor(entry.zoom ?? currentPreferences().defaultZoom / 100)
+    contents.setAudioMuted(!!tab.muted)
     let recorded = false
     function recordVisit(): void {
-      if (recorded || tab.error) return
+      if (recorded || tab.incognito || tab.error || isInternalUrl(tab.url)) return
       search.visit(tab, entry.typed)
       if (entry.query)
         search.select(
@@ -168,6 +560,7 @@ export function attachBrowser(window: BaseWindow, store: SearchStore): WebConten
     }
     keyboard(contents)
     contents.on('did-start-loading', () => {
+      if (isInternalUrl(tab.url) || tab.sleeping) return
       tab.loading = true
       tab.error = ''
       publish()
@@ -177,9 +570,15 @@ export function attachBrowser(window: BaseWindow, store: SearchStore): WebConten
       publish()
     })
     contents.on('focus', () => {
-      if (!window.isDestroyed()) chrome.webContents.send('browser:page-focus')
+      if (!window.isDestroyed()) {
+        chrome.webContents.send('browser:page-focus')
+        if (!sidebar.webContents.isDestroyed()) sidebar.webContents.send('browser:page-focus')
+      }
     })
     contents.on('did-navigate', (_, destination) => {
+      entry.fontCss = undefined
+      fontVersions.set(contents, (fontVersions.get(contents) ?? 0) + 1)
+      if (isInternalUrl(tab.url) || tab.sleeping) return
       recorded = false
       tab.url = destination
       tab.title = new URL(destination).hostname
@@ -187,7 +586,7 @@ export function attachBrowser(window: BaseWindow, store: SearchStore): WebConten
       publish()
     })
     contents.on('did-navigate-in-page', (_, destination, mainFrame) => {
-      if (mainFrame && tab.url !== destination) {
+      if (mainFrame && !isInternalUrl(tab.url) && !tab.sleeping && tab.url !== destination) {
         recorded = false
         tab.url = destination
         recordVisit()
@@ -206,7 +605,21 @@ export function attachBrowser(window: BaseWindow, store: SearchStore): WebConten
       search.metadata(tab)
       publish()
     })
+    contents.on('audio-state-changed', ({ audible }) => {
+      tab.audible = audible
+      tab.muted = contents.isAudioMuted()
+      publish()
+    })
     contents.on('did-finish-load', () => {
+      contents.setZoomFactor(entry.zoom ?? currentPreferences().defaultZoom / 100)
+      if (tab.sleeping) return
+      void applyWebsiteFont(entry)
+      if (entry.scroll[0] || entry.scroll[1]) {
+        void contents
+          .executeJavaScript(`scrollTo(${entry.scroll[0]},${entry.scroll[1]})`)
+          .catch(() => {})
+        entry.scroll = [0, 0]
+      }
       if (contents.getURL() !== tab.url || tab.error) return
       tab.title = contents.getTitle() || new URL(tab.url).hostname
       publish()
@@ -214,29 +627,94 @@ export function attachBrowser(window: BaseWindow, store: SearchStore): WebConten
       else recordVisit()
     })
     contents.on('did-fail-load', (_, code, description, destination, mainFrame) => {
-      if (!mainFrame || code === -3) return
+      if (!mainFrame || code === -3 || isInternalUrl(tab.url) || tab.sleeping) return
       tab.url = destination
       tab.loading = false
       tab.error = `Could not load this page: ${description}`
       publish()
     })
     contents.on('render-process-gone', () => {
+      if (isInternalUrl(tab.url) || tab.discarded) return
+      tab.sleeping = false
       tab.loading = false
       tab.error = 'This page stopped responding. Enter its address to reload.'
       publish()
     })
     contents.on('will-navigate', (event, destination) => {
-      if (!/^https?:\/\//i.test(destination)) event.preventDefault()
+      if (!(extensions?.allowedURL(destination) ?? /^https?:\/\//i.test(destination)))
+        event.preventDefault()
     })
     contents.on('will-redirect', (event, destination) => {
-      if (!/^https?:\/\//i.test(destination)) event.preventDefault()
+      if (!(extensions?.allowedURL(destination) ?? /^https?:\/\//i.test(destination)))
+        event.preventDefault()
     })
-    contents.setWindowOpenHandler(({ url: destination }) => {
-      if (/^https?:\/\//i.test(destination)) newTab(destination)
+    contents.setWindowOpenHandler(({ url: destination, disposition }) => {
+      if (extensions?.allowedURL(destination) ?? /^https?:\/\//i.test(destination))
+        newTab(
+          destination,
+          disposition === 'background-tab' || currentPreferences().backgroundTabs,
+          disposition === 'background-tab' ? tab.id : undefined,
+          !!tab.incognito
+        )
       return { action: 'deny' }
     })
-    switchTab(id)
-    if (url) load(url, id)
+  }
+
+  function wakeTab(tab: TabEntry, restore = true): Promise<void> {
+    if (tab.waking) return tab.waking
+    tab.waking = (async () => {
+      await tab.transition
+      if (window.isDestroyed() || tabs.get(tab.state.id) !== tab) return
+      if (tab.state.discarded) {
+        let snapshot: TabSnapshot | undefined
+        if (restore) {
+          try {
+            snapshot = snapshots.read(tab.state.id)
+          } catch (error) {
+            console.error('Could not read tab restore data; reloading its address:', error)
+          }
+        }
+        if (snapshot) {
+          tab.scroll = snapshot.scroll
+          tab.zoom ??= snapshot.zoom
+          tab.state.muted ??= snapshot.muted
+        }
+        createTabView(tab)
+        tab.state.discarded = false
+        if (restore) {
+          tab.state.loading = true
+          publish()
+          const contents = tab.view!.webContents
+          if (snapshot) {
+            try {
+              await contents.navigationHistory.restore({
+                entries: snapshot.entries,
+                index: snapshot.index
+              })
+            } catch {
+              await contents.loadURL(tab.state.url)
+            }
+          } else await contents.loadURL(tab.state.url)
+        }
+        snapshots.remove(tab.state.id)
+      } else if (tab.state.sleeping && tab.view) {
+        await thawTab(tab.view.webContents)
+        tab.state.sleeping = false
+        void applyWebsiteFont(tab)
+      }
+      publish()
+    })()
+      .catch((error) => {
+        if (window.isDestroyed() || tabs.get(tab.state.id) !== tab) return
+        tab.state.loading = false
+        tab.state.error = 'Could not restore this tab. Enter its address to reload.'
+        console.error('Could not wake tab:', error)
+        publish()
+      })
+      .finally(() => {
+        tab.waking = undefined
+      })
+    return tab.waking
   }
 
   function closeTab(id: string): void {
@@ -244,9 +722,16 @@ export function attachBrowser(window: BaseWindow, store: SearchStore): WebConten
     if (!tab) return
     const ids = [...tabs.keys()]
     const index = ids.indexOf(id)
+    if (!tab.state.incognito) closedTabs.push({ url: tab.state.url, index })
+    if (closedTabs.length > 25) closedTabs.shift()
     tabs.delete(id)
-    window.contentView.removeChildView(tab.view)
-    if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close()
+    if (tab.view) {
+      window.contentView.removeChildView(tab.view)
+      if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close()
+    }
+    snapshots.remove(id)
+    if (tab.state.incognito && ![...tabs.values()].some((entry) => entry.state.incognito))
+      clearIncognitoSession()
     if (!tabs.size) newTab()
     else if (activeTabId === id) switchTab(ids[index + 1] ?? ids[index - 1])
     else publish()
@@ -255,13 +740,26 @@ export function attachBrowser(window: BaseWindow, store: SearchStore): WebConten
   function reorderTab(id: string, targetId: string): void {
     const entries = [...tabs.entries()]
     const from = entries.findIndex(([tabId]) => tabId === id)
-    const target = entries.findIndex(([tabId]) => tabId === targetId)
+    const target =
+      targetId === '' ? entries.length : entries.findIndex(([tabId]) => tabId === targetId)
     if (from < 0 || target < 0 || from === target) return
     const [entry] = entries.splice(from, 1)
     entries.splice(target > from ? target - 1 : target, 0, entry)
     tabs.clear()
     for (const [tabId, tab] of entries) tabs.set(tabId, tab)
     publish()
+  }
+
+  function clearIncognitoSession(): void {
+    if (!incognitoPartition) return
+    const privateSession = session.fromPartition(incognitoPartition)
+    clearPrivateWebsitePermissions(privateSession)
+    incognitoPartition = undefined
+    void Promise.all([
+      privateSession.clearStorageData(),
+      privateSession.clearCache(),
+      privateSession.clearAuthCache()
+    ]).catch((error) => console.error('Could not clear incognito storage:', error))
   }
 
   function isTrusted(event: IpcMainEvent | IpcMainInvokeEvent): boolean {
@@ -276,9 +774,8 @@ export function attachBrowser(window: BaseWindow, store: SearchStore): WebConten
   function navigate(event: IpcMainEvent, input: unknown): void {
     if (!isTrusted(event) || typeof input !== 'string' || input.length > 8192) return
     try {
-      const url = resolveAddress(input)
-      if (url)
-        load(url, activeTabId, !url.startsWith('https://www.google.com/search?q='), input.trim())
+      const url = resolveAddress(input, currentPreferences().searchEngine)
+      if (url) load(url, activeTabId, resolveAddress(input) !== searchUrl(input), input.trim())
     } catch (error) {
       tabs.get(activeTabId)!.state.error =
         error instanceof Error ? error.message : 'Invalid address.'
@@ -291,17 +788,18 @@ export function attachBrowser(window: BaseWindow, store: SearchStore): WebConten
     if (typeof query !== 'string' || query.length > 8192) return
     if (result.kind === 'tab' && 'tabId' in result && typeof result.tabId === 'string') {
       const tab = tabs.get(result.tabId)?.state
-      if (tab) {
-        search.select(
-          {
-            id: `tab:${tab.id}`,
-            kind: 'tab',
-            tabId: tab.id,
-            title: tab.title,
-            url: tab.url
-          },
-          query
-        )
+      if (tab && !!tab.incognito === !!tabs.get(activeTabId)?.state.incognito) {
+        if (!tab.incognito)
+          search.select(
+            {
+              id: `tab:${tab.id}`,
+              kind: 'tab',
+              tabId: tab.id,
+              title: tab.title,
+              url: tab.url
+            },
+            query
+          )
         switchTab(tab.id)
       }
     } else if (
@@ -311,7 +809,7 @@ export function attachBrowser(window: BaseWindow, store: SearchStore): WebConten
       result.query.trim() &&
       result.query.length <= 2048
     ) {
-      load(`https://www.google.com/search?q=${encodeURIComponent(result.query.trim())}`)
+      load(searchUrl(result.query, currentPreferences().searchEngine))
     } else if (
       result.kind === 'website' &&
       'url' in result &&
@@ -321,7 +819,12 @@ export function attachBrowser(window: BaseWindow, store: SearchStore): WebConten
       try {
         const url = new URL(result.url)
         if (!['http:', 'https:'].includes(url.protocol)) return
-        load(url.href, activeTabId, resolveAddress(query) === url.href, query)
+        load(
+          url.href,
+          activeTabId,
+          resolveAddress(query, currentPreferences().searchEngine) === url.href,
+          query
+        )
       } catch {
         return
       }
@@ -351,65 +854,73 @@ export function attachBrowser(window: BaseWindow, store: SearchStore): WebConten
       query,
       mode as SearchMode,
       controller.signal,
-      [...tabs.values()].map((tab) => tab.state),
+      [...tabs.values()]
+        .map((tab) => tab.state)
+        .filter((tab) => !!tab.incognito === !!tabs.get(activeTabId)?.state.incognito),
       online === true,
       (response, pending) => {
         if (!controller.signal.aborted && !event.sender.isDestroyed())
           event.sender.send('browser:search-update', { requestId, response, pending })
-      }
+      },
+      !!tabs.get(activeTabId)?.state.incognito
     )
   }
 
   function overlay(event: IpcMainEvent, height: unknown): void {
     if (!isTrusted(event) || typeof height !== 'number' || !Number.isFinite(height)) return
-    overlayHeight = Math.max(38, Math.min(900, Math.ceil(height)))
+    overlayHeight = Math.max(0, Math.min(900, Math.ceil(height)))
     resize()
   }
+  function openHistory(): void {
+    const existing = [...tabs.values()].find((tab) => isSettingsUrl(tab.state.url))
+    if (existing) {
+      load(historyUrl, existing.state.id)
+      switchTab(existing.state.id)
+    } else newTab(historyUrl)
+  }
+
   function tabAction(event: IpcMainEvent, action: unknown, id: unknown, targetId: unknown): void {
     if (!isTrusted(event)) return
     if (action === 'new') newTab()
-    else if (action === 'reorder' && typeof id === 'string' && typeof targetId === 'string')
+    else if (action === 'history') openHistory()
+    else if (action === 'incognito') newTab(undefined, false, undefined, true)
+    else if (action === 'downloads') {
+      const existing = [...tabs.values()].find((tab) => tab.state.url === downloadsUrl)
+      if (existing) switchTab(existing.state.id)
+      else newTab(downloadsUrl)
+    } else if (action === 'settings' || action === 'extensions') {
+      const existing = [...tabs.values()].find((tab) => isSettingsUrl(tab.state.url))
+      const destination = action === 'extensions' ? `${settingsUrl}/extensions` : settingsUrl
+      if (existing) {
+        if (action === 'extensions') load(destination, existing.state.id)
+        switchTab(existing.state.id)
+      } else newTab(destination)
+    } else if (action === 'reorder' && typeof id === 'string' && typeof targetId === 'string')
       reorderTab(id, targetId)
     else if (typeof id === 'string') {
       if (action === 'switch') switchTab(id, event.sender !== sidebar.webContents)
       else if (action === 'close') closeTab(id)
-    }
-  }
-  function shortcuts(event: IpcMainEvent, value: unknown): void {
-    if (!isTrusted(event) || !Array.isArray(value) || value.length > 30) return
-    const valid: SearchShortcut[] = []
-    for (const entry of value) {
-      if (
-        !entry ||
-        typeof entry.keyword !== 'string' ||
-        !/^[a-z0-9_-]{1,20}$/.test(entry.keyword) ||
-        typeof entry.title !== 'string' ||
-        !entry.title ||
-        entry.title.length > 80 ||
-        typeof entry.url !== 'string' ||
-        entry.url.length > 2048 ||
-        !entry.url.includes('{query}')
-      )
-        return
-      try {
-        if (!['http:', 'https:'].includes(new URL(entry.url).protocol)) return
-      } catch {
-        return
+      else if (action === 'mute') {
+        const tab = tabs.get(id)
+        if (tab) {
+          tab.state.muted = !tab.state.muted
+          tab.view?.webContents.setAudioMuted(tab.state.muted)
+          publish()
+        }
       }
-      if (valid.some((shortcut) => shortcut.keyword === entry.keyword)) return
-      valid.push({ keyword: entry.keyword, title: entry.title, url: entry.url })
     }
-    search.shortcuts = valid
   }
   function ready(event: IpcMainEvent): void {
-    if (isTrusted(event)) publish()
+    if (isTrusted(event)) {
+      event.sender.send('browser:topbar-hover', pointerNearTopbar)
+      publish()
+    }
   }
   const listeners = {
     'browser:navigate': navigate,
     'browser:activate': activate,
     'browser:overlay': overlay,
     'browser:tab': tabAction,
-    'browser:shortcuts': shortcuts,
     'browser:ready': ready
   }
   for (const [channel, listener] of Object.entries(listeners)) ipcMain.on(channel, listener)
@@ -422,8 +933,21 @@ export function attachBrowser(window: BaseWindow, store: SearchStore): WebConten
   }
   keyboard(chrome.webContents)
   keyboard(sidebar.webContents)
+  registerTheme(chrome, false, isTrusted, applyAppearance)
+  registerTheme(sidebar, true, isTrusted)
+  registerSiteSearch(chrome.webContents, isTrusted, (value) => {
+    search.shortcuts = value
+  })
+  commandsRuntime().register(
+    chrome.webContents,
+    isTrusted,
+    () => tabs.get(activeTabId)?.view?.webContents
+  )
   sidebar.webContents.on('will-navigate', (event) => event.preventDefault())
   sidebar.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  sidebar.webContents.on('blur', () => {
+    if (!sidebar.webContents.isDestroyed()) sidebar.webContents.send('browser:page-focus')
+  })
   chrome.webContents.once('did-finish-load', () => {
     const url = new URL(chrome.webContents.getURL())
     url.hash = 'tabs'
@@ -439,6 +963,50 @@ export function attachBrowser(window: BaseWindow, store: SearchStore): WebConten
     if (!chrome.webContents.isDestroyed()) chrome.webContents.send('browser:search-data-cleared')
   }
   store.on('cleared', cleared)
+  const historyChanged = (): void => {
+    if (!chrome.webContents.isDestroyed()) chrome.webContents.send('history:changed')
+  }
+  store.on('history-changed', historyChanged)
+  chrome.webContents.ipc.handle('history:get', (event, filter: unknown) => {
+    if (!isTrusted(event)) throw new Error('Untrusted history request.')
+    return store.historyPage(parseHistoryQuery(filter))
+  })
+  chrome.webContents.ipc.handle('history:open', (event, id: unknown, target: unknown) => {
+    if (
+      !isTrusted(event) ||
+      !Number.isSafeInteger(id) ||
+      !['tab', 'background', 'incognito'].includes(target as string)
+    )
+      throw new Error('Invalid history visit.')
+    const visit = store.historyVisit(id as number)
+    if (!visit) throw new Error('Visit no longer exists.')
+    newTab(visit.url, target === 'background', undefined, target === 'incognito')
+  })
+  chrome.webContents.ipc.handle('history:copy', (event, id: unknown) => {
+    if (!isTrusted(event) || !Number.isSafeInteger(id)) throw new Error('Invalid history visit.')
+    const visit = store.historyVisit(id as number)
+    if (!visit) throw new Error('Visit no longer exists.')
+    return clipboard.writeText(visit.url)
+  })
+  chrome.webContents.ipc.handle('history:remove', async (event, value: unknown) => {
+    if (!isTrusted(event)) throw new Error('Untrusted history request.')
+    const removal = parseHistoryRemoval(value)
+    const { response } = await dialog.showMessageBox(window, {
+      type: 'warning',
+      message: removal.ids
+        ? `Delete ${removal.ids.length === 1 ? 'visit' : `${removal.ids.length} visits`}?`
+        : 'Clear browsing history?',
+      detail: removal.ids
+        ? 'Remove selected visits from history.'
+        : 'Remove all visits in the selected time range.',
+      buttons: ['Delete', 'Cancel'],
+      defaultId: 1,
+      cancelId: 1
+    })
+    if (window.isDestroyed() || response !== 0) return false
+    store.removeHistory(removal)
+    return true
+  })
   for (const contents of [chrome.webContents, sidebar.webContents]) {
     contents.ipc.handle('browser:clear-search-data', async (event) => {
       if (!isTrusted(event)) return false
@@ -463,16 +1031,275 @@ export function attachBrowser(window: BaseWindow, store: SearchStore): WebConten
     })
   }
   window.on('resize', resize)
+  let appliedPreferences = currentPreferences()
+  extensions?.registerWindow(window, {
+    createTab: (url, active) => {
+      if (url && !extensions.allowedURL(url)) throw new Error('Unsupported extension navigation.')
+      return newTab(url, !active).view!.webContents
+    },
+    selectTab: (contents) => {
+      if (registeringExtensionTab) return
+      const tab = [...tabs.values()].find((entry) => entry.view?.webContents === contents)
+      if (tab) switchTab(tab.state.id)
+    },
+    removeTab: (contents) => {
+      const tab = [...tabs.values()].find((entry) => entry.view?.webContents === contents)
+      if (tab) closeTab(tab.state.id)
+    }
+  })
+  for (const contents of [chrome.webContents, sidebar.webContents])
+    extensions?.registerUI(contents, window, isTrusted, (url) => {
+      newTab(url)
+    })
+  for (const contents of [chrome.webContents, sidebar.webContents])
+    contents.ipc.on('ui:legacy-storage', (event) => {
+      event.returnValue = isTrusted(event) ? legacyUIStorage() : {}
+    })
+  for (const contents of [chrome.webContents, sidebar.webContents]) {
+    registerDownloads(contents, isTrusted, session.defaultSession)
+    registerWebsitePermissionSettings(
+      contents,
+      isTrusted,
+      () => tabs.get(activeTabId)?.view?.webContents
+    )
+    registerPreferences(contents, window, isTrusted, (value) => {
+      for (const client of [
+        chrome.webContents,
+        sidebar.webContents,
+        ...[...tabs.values()].flatMap((tab) => (tab.view ? [tab.view.webContents] : []))
+      ])
+        if (!client.isDestroyed())
+          for (const frame of client.mainFrame.framesInSubtree)
+            if (!frame.detached) frame.send('keybinds:changed', value.keybindings)
+      if (value.searchEngine !== appliedPreferences.searchEngine) suggestionRequest?.abort()
+      if (value.defaultZoom !== appliedPreferences.defaultZoom)
+        for (const tab of tabs.values()) {
+          tab.zoom = value.defaultZoom / 100
+          if (tab.view && !tab.view.webContents.isDestroyed()) {
+            tab.view.webContents.setZoomFactor(value.defaultZoom / 100)
+          }
+        }
+      for (const tab of tabs.values()) {
+        if (!tab.state.sleeping) continue
+        const host = new URL(tab.state.url).hostname
+        if (
+          value.tabSleepMinutes === 0 ||
+          value.tabSleepExceptions.some(
+            (exception) => host === exception || host.endsWith(`.${exception}`)
+          )
+        )
+          void wakeTab(tab)
+      }
+      appliedPreferences = value
+    })
+  }
+  let closingConfirmed = false
+  let confirmingClose = false
+  window.on('close', (event) => {
+    if (closingConfirmed || !currentPreferences().confirmClose || tabs.size < 2) return
+    event.preventDefault()
+    if (confirmingClose) return
+    confirmingClose = true
+    void dialog
+      .showMessageBox(window, {
+        type: 'question',
+        message: `Close ${tabs.size} tabs?`,
+        buttons: ['Close tabs', 'Cancel'],
+        defaultId: 1,
+        cancelId: 1
+      })
+      .then(({ response }) => {
+        confirmingClose = false
+        if (response !== 0 || window.isDestroyed()) return
+        closingConfirmed = true
+        window.close()
+      })
+      .catch(() => {
+        confirmingClose = false
+      })
+  })
+  const topbarHoverTimer = setInterval(() => {
+    const bounds = window.getContentBounds()
+    const cursor = screen.getCursorScreenPoint()
+    const near =
+      window.isVisible() &&
+      cursor.x >= bounds.x + sidebarWidth &&
+      cursor.x < bounds.x + bounds.width &&
+      cursor.y >= bounds.y &&
+      cursor.y < bounds.y + (overlayHeight > 0 ? currentTheme().addressBarHeight : 12)
+    if (near === pointerNearTopbar) return
+    pointerNearTopbar = near
+    chrome.webContents.send('browser:topbar-hover', near)
+  }, 50)
   window.on('closed', () => {
+    finder.destroy()
+    closeSession(windowId)
+    clearInterval(sleepTimer)
+    clearInterval(topbarHoverTimer)
     store.off('cleared', cleared)
+    store.off('history-changed', historyChanged)
     suggestionRequest?.abort()
     for (const [channel, listener] of Object.entries(listeners))
       ipcMain.removeListener(channel, listener)
     for (const tab of tabs.values())
-      if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close()
+      if (tab.view && !tab.view.webContents.isDestroyed()) tab.view.webContents.close()
+    snapshots.clear()
+    clearIncognitoSession()
     if (!sidebar.webContents.isDestroyed()) sidebar.webContents.close()
     if (!chrome.webContents.isDestroyed()) chrome.webContents.close()
   })
-  newTab()
+  function memoryMode(tab: TabEntry): 'sleep' | 'discard' | undefined {
+    if (
+      tab.state.id === activeTabId ||
+      tab.state.discarded ||
+      tab.state.loading ||
+      tab.state.error ||
+      tab.waking ||
+      !tab.view ||
+      !/^https?:/.test(tab.state.url)
+    )
+      return
+    const contents = tab.view.webContents
+    if (
+      contents.isDestroyed() ||
+      contents.isCurrentlyAudible() ||
+      hasActiveDownload(contents) ||
+      contents.isBeingCaptured()
+    )
+      return
+    const preferences = currentPreferences()
+    const host = new URL(tab.state.url).hostname
+    const elapsed = Date.now() - tab.lastActive
+    const excluded = (exceptions: string[]): boolean =>
+      exceptions.some((exception) => host === exception || host.endsWith(`.${exception}`))
+    if (
+      preferences.tabDiscardMinutes > 0 &&
+      elapsed >= preferences.tabDiscardMinutes * 60000 &&
+      !excluded(preferences.tabDiscardExceptions)
+    )
+      return 'discard'
+    if (
+      !tab.state.sleeping &&
+      preferences.tabSleepMinutes > 0 &&
+      elapsed >= preferences.tabSleepMinutes * 60000 &&
+      !excluded(preferences.tabSleepExceptions)
+    )
+      return 'sleep'
+    return
+  }
+
+  const sleepTimer = setInterval(() => {
+    for (const [id, tab] of tabs) {
+      const mode = memoryMode(tab)
+      if (!mode || sleepChecks.has(id) || !tab.view) continue
+      const contents = tab.view.webContents
+      const address = tab.state.url
+      sleepChecks.add(id)
+      const lastActive = tab.lastActive
+      const root = contents.mainFrame
+      const frames = [
+        root,
+        ...root.framesInSubtree.filter((frame) => frame.frameTreeNodeId !== root.frameTreeNodeId)
+      ]
+      tab.transition = (
+        tab.state.sleeping
+          ? Promise.resolve([{ dirty: false, scroll: tab.scroll }])
+          : Promise.all(
+              frames.map((frame) =>
+                frame.executeJavaScript(`(() => ({
+        dirty: [...document.querySelectorAll('input, textarea, select, [contenteditable]')].some(field => {
+          if (field.isContentEditable) return !!field.textContent
+          if (field.tagName === 'SELECT') {
+            const options = [...field.options]
+            if (field.multiple) return options.some(option => option.selected !== option.defaultSelected)
+            const initial = options.length ? Math.max(0, options.findLastIndex(option => option.defaultSelected)) : -1
+            return field.selectedIndex !== initial
+          }
+          if (field.type === 'checkbox' || field.type === 'radio') return field.checked !== field.defaultChecked
+          return field.value !== field.defaultValue
+        }), scroll: [scrollX, scrollY]
+      }))()`)
+              )
+            )
+      )
+        .then(async (results) => {
+          if (
+            !results.every(
+              (result): result is { dirty: boolean; scroll: [number, number] } =>
+                typeof result === 'object' &&
+                result !== null &&
+                'dirty' in result &&
+                typeof result.dirty === 'boolean' &&
+                'scroll' in result &&
+                Array.isArray(result.scroll) &&
+                result.scroll.length === 2 &&
+                result.scroll.every(
+                  (coordinate) => typeof coordinate === 'number' && Number.isFinite(coordinate)
+                )
+            )
+          )
+            return
+          if (
+            window.isDestroyed() ||
+            tabs.get(id) !== tab ||
+            tab.state.url !== address ||
+            tab.lastActive !== lastActive ||
+            memoryMode(tab) !== mode ||
+            results.some((result) => result.dirty) ||
+            contents.isCurrentlyAudible() ||
+            contents.isBeingCaptured() ||
+            hasActiveDownload(contents)
+          )
+            return
+          tab.scroll = results[0].scroll
+          if (mode === 'sleep') {
+            await freezeTab(contents)
+            if (
+              window.isDestroyed() ||
+              tabs.get(id) !== tab ||
+              tab.lastActive !== lastActive ||
+              memoryMode(tab) !== mode
+            ) {
+              await thawTab(contents)
+              return
+            }
+            tab.state.sleeping = true
+          } else {
+            tab.zoom = contents.getZoomFactor()
+            tab.state.muted = contents.isAudioMuted()
+            snapshots.save(
+              id,
+              {
+                entries: contents.navigationHistory.getAllEntries(),
+                index: contents.navigationHistory.getActiveIndex(),
+                scroll: tab.scroll,
+                zoom: tab.zoom,
+                muted: tab.state.muted
+              },
+              !!tab.state.incognito
+            )
+            tab.state.discarded = true
+            tab.state.sleeping = false
+            tab.state.loading = false
+            tab.state.audible = false
+            window.contentView.removeChildView(tab.view!)
+            tab.view = undefined
+            contents.close()
+          }
+          publish()
+        })
+        .catch((error) => console.error('Could not change tab memory state:', error))
+        .finally(() => {
+          sleepChecks.delete(id)
+          tab.transition = undefined
+        })
+    }
+  }, 15000)
+  sleepTimer.unref()
+  const startup = startupSession(currentPreferences())
+  for (const url of startup.urls) newTab(url, true)
+  switchTab([...tabs.keys()][startup.active] ?? [...tabs.keys()][0], false)
+  initializing = false
+  publish()
   return chrome.webContents
 }

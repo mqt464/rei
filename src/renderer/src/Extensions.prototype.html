@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Rei bundled-extension lifecycle prototype</title>
+  <style>
+    :root {
+      color-scheme: dark light;
+      font:
+        14px/1.6 system-ui,
+        sans-serif;
+    }
+    body {
+      max-width: 700px;
+      margin: 40px auto;
+      padding: 0 20px;
+    }
+    h1 {
+      font-size: 24px;
+    }
+    h2 {
+      font-size: 17px;
+    }
+    button {
+      font: inherit;
+      color: inherit;
+      background: transparent;
+      border: 1px solid #8887;
+      border-radius: 6px;
+      padding: 7px 12px;
+      cursor: pointer;
+    }
+    button:hover,
+    button[aria-selected='true'] {
+      background: #8882;
+    }
+    button:focus-visible {
+      outline: 2px solid #759dff;
+      outline-offset: 3px;
+    }
+    section {
+      padding: 16px 0;
+      border-top: 1px solid #8885;
+    }
+    .buttons {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    dl {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    dd {
+      margin: 0;
+      font-weight: 600;
+    }
+    #message {
+      min-height: 2em;
+    }
+    .note {
+      color: #999;
+    }
+  </style>
+  <h1>Bundled extensions: lifecycle prototype</h1>
+  <p>
+    Question: Does enabling uBlock Origin by default, remembering a disable choice, and preventing
+    removal feel right?
+  </p>
+  <p class="note">
+    Throwaway demo. All state stays in memory. Nothing here changes Rei or installs an extension.
+  </p>
+  <section aria-labelledby="state-title">
+    <h2 id="state-title">Current state</h2>
+    <dl id="state"></dl>
+    <p id="message" role="status"></p>
+  </section>
+  <section aria-labelledby="free-title">
+    <h2 id="free-title">Free play</h2>
+    <div class="buttons" id="actions">
+      <button data-action="enable">Enable uBlock Origin</button
+      ><button data-action="disable">Disable uBlock Origin</button>
+      <button data-action="restart">Restart Rei</button
+      ><button data-action="remove">Remove bundled extension</button
+      ><button data-action="reset">Reset demo</button>
+    </div>
+  </section>
+  <section aria-labelledby="walkthrough-title">
+    <h2 id="walkthrough-title">Guided walkthroughs</h2>
+    <div class="buttons" role="tablist" aria-label="Scenarios" id="scenarios"></div>
+    <div id="walkthrough" role="tabpanel" tabindex="0">
+      <p id="description"></p>
+      <div class="buttons" id="steps"></div>
+    </div>
+  </section>
+  <script>
+    const initialState = () => ({
+      enabled: true,
+      savedEnabled: true,
+      bundled: true,
+      restarts: 0,
+      message: 'First launch: uBlock Origin is already enabled.'
+    })
+    function transition(state, action) {
+      if (action === 'reset') return initialState()
+      if (action === 'enable' || action === 'disable')
+        return {
+          ...state,
+          enabled: action === 'enable',
+          savedEnabled: action === 'enable',
+          message:
+            action === 'enable'
+              ? 'Protection enabled. The choice is saved.'
+              : 'Protection disabled. The choice is saved.'
+        }
+      if (action === 'restart')
+        return {
+          ...state,
+          enabled: state.savedEnabled,
+          restarts: state.restarts + 1,
+          message: 'Rei restarted. Your saved choice was restored.'
+        }
+      return {
+        ...state,
+        message: 'Bundled extensions cannot be removed. You can disable uBlock Origin instead.'
+      }
+    }
+    const scenarios = [
+      {
+        name: 'First launch',
+        description: 'Protection starts enabled and stays enabled after a restart.',
+        actions: ['restart']
+      },
+      {
+        name: 'Disable and restart',
+        description: 'A bundled extension must not turn itself back on after you disable it.',
+        actions: ['disable', 'restart', 'enable']
+      },
+      {
+        name: 'Try removing it',
+        description: 'Removal is refused without changing protection or the saved choice.',
+        actions: ['remove', 'disable', 'remove', 'restart']
+      }
+    ]
+    let state = initialState()
+    let selected = 0
+    const stateElement = document.getElementById('state')
+    function render() {
+      stateElement.replaceChildren()
+      for (const [label, value] of Object.entries({
+        Extension: 'uBlock Origin',
+        Protection: state.enabled ? 'Enabled' : 'Disabled',
+        'Saved choice': state.savedEnabled ? 'Enabled' : 'Disabled',
+        'Ships with Rei': state.bundled ? 'Yes' : 'No',
+        Restarts: state.restarts
+      })) {
+        const term = document.createElement('dt'),
+          detail = document.createElement('dd')
+        term.textContent = label
+        detail.textContent = value
+        stateElement.append(term, detail)
+      }
+      document.getElementById('message').textContent = state.message
+    }
+    function dispatch(action) {
+      state = transition(state, action)
+      render()
+    }
+    document.getElementById('actions').addEventListener('click', (event) => {
+      if (event.target.dataset.action) dispatch(event.target.dataset.action)
+    })
+    function selectScenario(index) {
+      selected = index
+      state = initialState()
+      render()
+      document.querySelectorAll('[role=tab]').forEach((button, position) => {
+        button.setAttribute('aria-selected', position === index)
+        button.tabIndex = position === index ? 0 : -1
+      })
+      document.getElementById('walkthrough').setAttribute('aria-labelledby', `scenario-${index}`)
+      document.getElementById('description').textContent = scenarios[index].description
+      const steps = document.getElementById('steps')
+      steps.replaceChildren()
+      scenarios[index].actions.forEach((action, position) => {
+        const button = document.createElement('button')
+        button.textContent = `${position + 1}. ${action[0].toUpperCase() + action.slice(1)}`
+        button.onclick = () => dispatch(action)
+        steps.append(button)
+      })
+    }
+    scenarios.forEach((scenario, index) => {
+      const button = document.createElement('button')
+      button.id = `scenario-${index}`
+      button.role = 'tab'
+      button.setAttribute('aria-controls', 'walkthrough')
+      button.textContent = scenario.name
+      button.onclick = () => selectScenario(index)
+      document.getElementById('scenarios').append(button)
+    })
+    document.getElementById('scenarios').onkeydown = (event) => {
+      if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return
+      event.preventDefault()
+      selectScenario(
+        (selected + (event.key === 'ArrowRight' ? 1 : -1) + scenarios.length) % scenarios.length
+      )
+      document.getElementById(`scenario-${selected}`).focus()
+    }
+    selectScenario(0)
+  </script>
+</html>
