@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte'
   import { smoothText } from './smoothText'
+  import Morph from './components/Morph.svelte'
   import type { FindState } from '../../shared/browser'
 
   let input: HTMLInputElement
@@ -60,7 +61,9 @@
     />
   </div>
   <output aria-live="polite" aria-atomic="true" class:no-match={query && !state.matches}>
-    {query ? `${state.activeMatchOrdinal}/${state.matches}` : ''}
+    <Morph text={query ? String(state.activeMatchOrdinal) : ''} preset="counter" />{query
+      ? '/'
+      : ''}<Morph text={query ? String(state.matches) : ''} preset="counter" />
   </output>
   <button
     aria-label="Previous match"

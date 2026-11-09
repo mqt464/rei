@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte'
+  import Morph from '../Morph.svelte'
   export let id: string
   export let label: string
   export let value: number
@@ -31,5 +32,11 @@
     style:--slider-fill={`${((value - min) / (max - min)) * 100}%`}
     on:change={() => dispatch('change', Number(value))}
   />
-  <output for={id} class:rei-duration-value={!!formatValue}>{formattedValue}</output>
+  <output for={id} class:rei-duration-value={!!formatValue}
+    ><Morph
+      text={formatValue || (offAtZero && value === 0) ? formattedValue : String(value)}
+      preset="counter"
+      category="textMorphSettings"
+    />{!formatValue && !(offAtZero && value === 0) ? unit : ''}</output
+  >
 </div>

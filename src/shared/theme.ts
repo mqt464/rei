@@ -68,6 +68,13 @@ export interface Theme {
   selectionRadius: number
   motion: 'system' | 'reduced' | 'none'
   animationSpeed: number
+  textMorphing: boolean
+  textMorphStyle: 'subtle' | 'balanced' | 'expressive'
+  textMorphCounters: boolean
+  textMorphStatus: boolean
+  textMorphActions: boolean
+  textMorphTitles: boolean
+  textMorphSettings: boolean
   wallpaper: string | null
   wallpaperFit: 'cover' | 'contain'
   wallpaperDim: number
@@ -124,6 +131,13 @@ export const defaultTheme: Theme = {
   selectionRadius: 3,
   motion: 'system',
   animationSpeed: 100,
+  textMorphing: true,
+  textMorphStyle: 'balanced',
+  textMorphCounters: true,
+  textMorphStatus: true,
+  textMorphActions: true,
+  textMorphTitles: true,
+  textMorphSettings: true,
   wallpaper: null,
   wallpaperFit: 'cover',
   wallpaperDim: 0,
@@ -167,6 +181,7 @@ export function themeColors(value: Theme, systemDark: boolean): Theme['colors'] 
 }
 
 const appearanceChoices = {
+  textMorphStyle: ['subtle', 'balanced', 'expressive'],
   density: ['compact', 'comfortable', 'custom'],
   tabIndicator: ['fill', 'line', 'none'],
   tabCloseButton: ['hover', 'always', 'never'],
@@ -236,7 +251,16 @@ export function parseTheme(value: unknown, current: Theme = defaultTheme): Theme
       )
         throw new Error(`${key} must be between ${minimum} and ${maximum}.`)
       Object.assign(next, { [key]: entry })
-    } else if (key === 'sidebarIconsOnly' || key === 'wallpaperDither') {
+    } else if (
+      key === 'sidebarIconsOnly' ||
+      key === 'wallpaperDither' ||
+      key === 'textMorphing' ||
+      key === 'textMorphCounters' ||
+      key === 'textMorphStatus' ||
+      key === 'textMorphActions' ||
+      key === 'textMorphTitles' ||
+      key === 'textMorphSettings'
+    ) {
       if (typeof entry !== 'boolean') throw new Error('Appearance switches must be on or off.')
       next[key] = entry
     } else if (key === 'wallpaperFolder') {

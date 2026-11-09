@@ -1,9 +1,11 @@
 import { writable } from 'svelte/store'
+import { actionError } from './errors'
 import { defaultTheme, themeColors, themeFonts } from '../../shared/theme'
 import { renderWallpaper, wallpaperKey } from './wallpaper'
 import type { Theme, ThemePatch } from '../../shared/theme'
 
 export const theme = writable<Theme>(defaultTheme)
+export const motionMode = writable<'full' | 'reduced' | 'none'>('full')
 export const palette = writable(defaultTheme.colors)
 export const themeError = writable('')
 export const wallpaperSource = writable<string | null>(null)
@@ -15,6 +17,7 @@ let imageGeneration = 0
 let rotation: ReturnType<typeof setInterval> | undefined
 
 function syncWallpaper(value: Theme): void {
+  if (['#tabs', '#context-menu', '#find'].includes(location.hash)) return
   const key = wallpaperKey(value)
   if (imageKey === key) return
   imageKey = key
@@ -50,6 +53,7 @@ function applyMotion(value: Theme): void {
   const mode =
     value.motion === 'system' ? (reducedMotion.matches ? 'reduced' : 'full') : value.motion
   document.documentElement.dataset.motion = mode
+  motionMode.set(mode)
 }
 reducedMotion.addEventListener('change', () => {
   theme.update((value) => {
@@ -160,11 +164,7 @@ export async function updateTheme(patch: ThemePatch): Promise<boolean> {
     themeError.set('')
     return true
   } catch (error) {
-    themeError.set(
-      error instanceof Error
-        ? error.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '')
-        : 'Could not save your theme. Try again.'
-    )
+    themeError.set(actionError(error, 'Could not save your theme. Try again.'))
     return false
   }
 }

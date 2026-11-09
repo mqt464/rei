@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import ExtensionsIcon from './components/ExtensionsIcon.svelte'
+  import Morph from './components/Morph.svelte'
   import { Button, Card, SettingRow, Switch } from './components/ui'
   import { extensions, watchExtensions } from './extensions'
   let busy = ''
@@ -69,13 +70,6 @@
           {#if extension.error}<p class="error" role="alert">
               {extension.error}
             </p>{/if}
-          {#if extension.compatibilityWarnings?.length}
-            <ul aria-label={`${extension.name} compatibility limits`}>
-              {#each extension.compatibilityWarnings as warning (warning)}
-                <li>{warning}</li>
-              {/each}
-            </ul>
-          {/if}
           <div class="extension-actions">
             {#if extension.options}
               <Button
@@ -105,7 +99,7 @@
     </Card>
   {/if}
 </fieldset>
-<p class="feedback" role="status">{status}</p>
+<p class="feedback" role="status"><Morph text={status} preset="action" /></p>
 {#if error || $extensions?.error}<p class="error" role="alert">
     {error || $extensions?.error}
   </p>{/if}

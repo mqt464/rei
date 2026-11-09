@@ -23,6 +23,7 @@ export const settingsPages = [
   { id: 'downloads', title: 'Downloads', url: `${settingsUrl}/downloads` },
   { id: 'history', title: 'History', url: historyUrl },
   { id: 'extensions', title: 'Extensions', url: `${settingsUrl}/extensions` },
+  { id: 'updates', title: 'Updates', url: `${settingsUrl}/updates` },
   { id: 'privacy', title: 'Privacy', url: `${settingsUrl}/privacy` }
 ] as const
 

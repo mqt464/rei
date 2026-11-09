@@ -25,6 +25,8 @@ import {
   settingsUrl
 } from '../shared/navigation'
 import { registerDownloads } from './downloads'
+import { isInstallingUpdate, registerUpdates } from './updates'
+import { registerDefaultBrowser, registerLinkWindow } from './default-browser'
 import { commandsRuntime } from './commands'
 import { registerPlayingMedia } from './playing-media'
 import { SearchService } from './search'
@@ -39,6 +41,7 @@ import {
   registerSessionPreferences
 } from './preferences'
 import { themeColors, themeFonts } from '../shared/theme'
+import { websiteScrollbarCSS } from '../shared/website-scrollbars'
 import { closeSession, saveSession, startupSession } from './session'
 import { freezeTab, thawTab, TabSnapshotStore } from './tab-memory'
 import type { TabSnapshot } from './tab-memory'
@@ -63,7 +66,7 @@ interface TabEntry {
   query?: string
   lastActive: number
   scroll: [number, number]
-  fontCss?: string
+  appearanceCss?: string
   zoom?: number
   transition?: Promise<void>
   waking?: Promise<void>
@@ -122,23 +125,34 @@ export function attachBrowser(
   let overlayHeight = 38
   let pointerNearTopbar = false
   let sidebarVisible = true
+  let pointerNearSidebar = false
   let sidebarWidth = 208
   let sidebarAnimation: ReturnType<typeof setInterval> | undefined
   let controlHeld = false
   let suggestionRequest: AbortController | undefined
   let initializing = true
   let registeringExtensionTab = false
-  const fontVersions = new WeakMap<WebContents, number>()
+  const appearanceVersions = new WeakMap<WebContents, number>()
   const sleepChecks = new Set<string>()
-  let websiteTypography = ''
+  let websiteAppearance = ''
+  let fullscreenTabId: string | undefined
   window.setContentView(new View())
   window.contentView.addChildView(sidebar)
   window.contentView.addChildView(chrome)
 
   function resize(animateSidebar = false): void {
     const { width, height } = window.getContentBounds()
-    if (!sidebarAnimation) sidebarWidth = sidebarVisible ? desiredSidebarWidth() : 0
+    if (fullscreenTabId) {
+      sidebar.setVisible(false)
+      chrome.setVisible(false)
+      tabs.get(fullscreenTabId)?.view?.setBounds({ x: 0, y: 0, width, height })
+      return
+    }
+    chrome.setVisible(true)
+    if (!sidebarAnimation)
+      sidebarWidth = sidebarVisible || pointerNearSidebar ? desiredSidebarWidth() : 0
     const sideWidth = sidebarWidth
+    sidebar.setVisible(sideWidth > 0)
     sidebar.setBounds({ x: 0, y: 0, width: sideWidth, height })
     const resizedTabs = animateSidebar
       ? [tabs.get(activeTabId)].filter((tab) => tab !== undefined)
@@ -195,12 +209,12 @@ export function attachBrowser(
         : Math.min(theme.sidebarWidth, Math.max(150, window.getContentBounds().width - 280))
   }
 
-  async function applyWebsiteFont(tab: TabEntry): Promise<void> {
+  async function applyWebsiteAppearance(tab: TabEntry): Promise<void> {
     if (!tab.view) return
     const contents = tab.view.webContents
     if (contents.isDestroyed() || tab.state.sleeping || !/^https?:/.test(tab.state.url)) return
-    const version = (fontVersions.get(contents) ?? 0) + 1
-    fontVersions.set(contents, version)
+    const version = (appearanceVersions.get(contents) ?? 0) + 1
+    appearanceVersions.set(contents, version)
     const theme = currentTheme()
     const css = [
       theme.webpageFont !== 'website'
@@ -212,20 +226,17 @@ export function attachBrowser(
       .filter(Boolean)
       .join(';')
     try {
-      if (tab.fontCss) {
-        const previous = tab.fontCss
-        tab.fontCss = undefined
+      if (tab.appearanceCss) {
+        const previous = tab.appearanceCss
+        tab.appearanceCss = undefined
         await contents.removeInsertedCSS(previous)
       }
-      if (version !== fontVersions.get(contents) || contents.isDestroyed()) return
-      if (css) {
-        const key = await contents.insertCSS(
-          `:where(body, body *):not(pre, code, pre *, code *, svg, svg *) { ${css} }`,
-          { cssOrigin: 'user' }
-        )
-        if (version !== fontVersions.get(contents)) await contents.removeInsertedCSS(key)
-        else tab.fontCss = key
-      }
+      if (version !== appearanceVersions.get(contents) || contents.isDestroyed()) return
+      const appearanceCSS = `${css ? `:where(body, body *):not(pre, code, pre *, code *, svg, svg *) { ${css} }` : ''}
+        ${websiteScrollbarCSS(theme, nativeTheme.shouldUseDarkColors)}`
+      const key = await contents.insertCSS(appearanceCSS, { cssOrigin: 'user' })
+      if (version !== appearanceVersions.get(contents)) await contents.removeInsertedCSS(key)
+      else tab.appearanceCss = key
     } catch {
       return
     }
@@ -236,16 +247,17 @@ export function attachBrowser(
     resize()
     const value = currentTheme()
     const background = themeColors(value, nativeTheme.shouldUseDarkColors).background
-    const typography = JSON.stringify([
+    const appearance = JSON.stringify([
       value.webpageFont,
       value.webpageFontSize,
-      value.webpageLineHeight
+      value.webpageLineHeight,
+      websiteScrollbarCSS(value, nativeTheme.shouldUseDarkColors)
     ])
     for (const tab of tabs.values()) {
       tab.view?.setBackgroundColor(background)
-      if (typography !== websiteTypography) void applyWebsiteFont(tab)
+      if (appearance !== websiteAppearance) void applyWebsiteAppearance(tab)
     }
-    websiteTypography = typography
+    websiteAppearance = appearance
   }
 
   function focusAddress(): void {
@@ -254,17 +266,23 @@ export function attachBrowser(
   }
 
   function toggleSidebar(): void {
-    if (sidebarAnimation) clearInterval(sidebarAnimation)
     sidebarVisible = !sidebarVisible
+    pointerNearSidebar = false
+    animateSidebar()
+  }
+
+  function animateSidebar(): void {
+    if (sidebarAnimation) clearInterval(sidebarAnimation)
+    const visible = sidebarVisible || pointerNearSidebar
     const from = sidebarWidth
-    const to = sidebarVisible ? desiredSidebarWidth() : 0
+    const to = visible ? desiredSidebarWidth() : 0
     const start = Date.now()
     const theme = currentTheme()
     const duration =
       theme.motion !== 'system' || systemPreferences.getAnimationSettings().prefersReducedMotion
         ? 0
         : 18000 / theme.animationSpeed
-    if (sidebarVisible) sidebar.setVisible(true)
+    if (visible) sidebar.setVisible(true)
     sidebarAnimation = setInterval(() => {
       const progress = duration ? Math.min(1, (Date.now() - start) / duration) : 1
       const eased = 1 - (1 - progress) ** 3
@@ -273,7 +291,7 @@ export function attachBrowser(
       if (progress === 1) {
         clearInterval(sidebarAnimation)
         sidebarAnimation = undefined
-        if (!sidebarVisible) sidebar.setVisible(false)
+        if (!visible) sidebar.setVisible(false)
       }
     }, 8)
   }
@@ -379,9 +397,6 @@ export function attachBrowser(
             : chrome.webContents
         void finder.show(source, `${activeTabId}:${tab?.state.url ?? ''}`).then(() => resize())
       } else if (action === 'toggleSidebar') toggleSidebar()
-      // Default open or close DevTools by F12 in development
-      // and ignore CommandOrControl + R in production.
-      // see https://github.com/alex8088/electron-toolkit/tree/master/packages/utils
       else if (action === 'devtools') {
         if (app.isPackaged) return
         const page = tabs.get(activeTabId)?.view?.webContents
@@ -459,7 +474,8 @@ export function attachBrowser(
         tab.typed = false
         tab.query = undefined
         publish()
-        void tab.view.webContents.loadURL('about:blank').catch(() => {})
+        if (tab.view.webContents.getURL())
+          void tab.view.webContents.loadURL('about:blank').catch(() => {})
         return
       }
       publish()
@@ -512,6 +528,7 @@ export function attachBrowser(
     const view = new WebContentsView({
       webPreferences: {
         preload: join(__dirname, '../preload/keyboard.js'),
+        additionalArguments: ['--rei-browsing'],
         partition: tab.incognito ? incognitoPartition : undefined,
         nodeIntegration: false,
         nodeIntegrationInSubFrames: true,
@@ -521,12 +538,29 @@ export function attachBrowser(
     })
     entry.view = view
     registerPlayingMedia(view.webContents)
-    entry.fontCss = undefined
+    entry.appearanceCss = undefined
     view.setBackgroundColor(themeColors(currentTheme(), nativeTheme.shouldUseDarkColors).background)
     window.contentView.addChildView(view)
     window.contentView.addChildView(chrome)
     view.setVisible(false)
     const contents = view.webContents
+    const leaveFullscreen = (): void => {
+      if (fullscreenTabId !== tab.id) return
+      fullscreenTabId = undefined
+      if (!window.isDestroyed()) resize()
+    }
+    contents.on('enter-html-full-screen', () => {
+      fullscreenTabId = tab.id
+      finder.close()
+      resize()
+    })
+    contents.on('leave-html-full-screen', leaveFullscreen)
+    contents.on('destroyed', leaveFullscreen)
+    contents.on('render-process-gone', leaveFullscreen)
+    contents.ipc.on('privacy:get', (event) => {
+      const { doNotTrack, globalPrivacyControl } = currentPreferences()
+      event.returnValue = { doNotTrack, globalPrivacyControl }
+    })
     registerWebsitePermissions(contents, window, !!tab.incognito)
     registerSessionPreferences(contents.session, !!tab.incognito)
     if (extensions && !tab.incognito) {
@@ -576,8 +610,8 @@ export function attachBrowser(
       }
     })
     contents.on('did-navigate', (_, destination) => {
-      entry.fontCss = undefined
-      fontVersions.set(contents, (fontVersions.get(contents) ?? 0) + 1)
+      entry.appearanceCss = undefined
+      appearanceVersions.set(contents, (appearanceVersions.get(contents) ?? 0) + 1)
       if (isInternalUrl(tab.url) || tab.sleeping) return
       recorded = false
       tab.url = destination
@@ -613,7 +647,7 @@ export function attachBrowser(
     contents.on('did-finish-load', () => {
       contents.setZoomFactor(entry.zoom ?? currentPreferences().defaultZoom / 100)
       if (tab.sleeping) return
-      void applyWebsiteFont(entry)
+      void applyWebsiteAppearance(entry)
       if (entry.scroll[0] || entry.scroll[1]) {
         void contents
           .executeJavaScript(`scrollTo(${entry.scroll[0]},${entry.scroll[1]})`)
@@ -700,7 +734,7 @@ export function attachBrowser(
       } else if (tab.state.sleeping && tab.view) {
         await thawTab(tab.view.webContents)
         tab.state.sleeping = false
-        void applyWebsiteFont(tab)
+        void applyWebsiteAppearance(tab)
       }
       publish()
     })()
@@ -1031,6 +1065,13 @@ export function attachBrowser(
     })
   }
   window.on('resize', resize)
+  const resizeAfterFullscreen = (): void => {
+    setImmediate(() => {
+      if (!window.isDestroyed()) resize()
+    })
+  }
+  window.on('enter-full-screen', resizeAfterFullscreen)
+  window.on('leave-full-screen', resizeAfterFullscreen)
   let appliedPreferences = currentPreferences()
   extensions?.registerWindow(window, {
     createTab: (url, active) => {
@@ -1057,6 +1098,8 @@ export function attachBrowser(
     })
   for (const contents of [chrome.webContents, sidebar.webContents]) {
     registerDownloads(contents, isTrusted, session.defaultSession)
+    registerUpdates(contents, window, isTrusted)
+    registerDefaultBrowser(contents, isTrusted)
     registerWebsitePermissionSettings(
       contents,
       isTrusted,
@@ -1070,7 +1113,13 @@ export function attachBrowser(
       ])
         if (!client.isDestroyed())
           for (const frame of client.mainFrame.framesInSubtree)
-            if (!frame.detached) frame.send('keybinds:changed', value.keybindings)
+            if (!frame.detached) {
+              frame.send('keybinds:changed', value.keybindings)
+              frame.send('privacy:changed', {
+                doNotTrack: value.doNotTrack,
+                globalPrivacyControl: value.globalPrivacyControl
+              })
+            }
       if (value.searchEngine !== appliedPreferences.searchEngine) suggestionRequest?.abort()
       if (value.defaultZoom !== appliedPreferences.defaultZoom)
         for (const tab of tabs.values()) {
@@ -1096,7 +1145,13 @@ export function attachBrowser(
   let closingConfirmed = false
   let confirmingClose = false
   window.on('close', (event) => {
-    if (closingConfirmed || !currentPreferences().confirmClose || tabs.size < 2) return
+    if (
+      isInstallingUpdate() ||
+      closingConfirmed ||
+      !currentPreferences().confirmClose ||
+      tabs.size < 2
+    )
+      return
     event.preventDefault()
     if (confirmingClose) return
     confirmingClose = true
@@ -1121,6 +1176,17 @@ export function attachBrowser(
   const topbarHoverTimer = setInterval(() => {
     const bounds = window.getContentBounds()
     const cursor = screen.getCursorScreenPoint()
+    const nearSidebar =
+      !sidebarVisible &&
+      window.isVisible() &&
+      cursor.x >= bounds.x &&
+      cursor.x < bounds.x + (pointerNearSidebar ? desiredSidebarWidth() : 12) &&
+      cursor.y >= bounds.y &&
+      cursor.y < bounds.y + bounds.height
+    if (nearSidebar !== pointerNearSidebar) {
+      pointerNearSidebar = nearSidebar
+      animateSidebar()
+    }
     const near =
       window.isVisible() &&
       cursor.x >= bounds.x + sidebarWidth &&
@@ -1136,6 +1202,7 @@ export function attachBrowser(
     closeSession(windowId)
     clearInterval(sleepTimer)
     clearInterval(topbarHoverTimer)
+    if (sidebarAnimation) clearInterval(sidebarAnimation)
     store.off('cleared', cleared)
     store.off('history-changed', historyChanged)
     suggestionRequest?.abort()
@@ -1300,6 +1367,12 @@ export function attachBrowser(
   for (const url of startup.urls) newTab(url, true)
   switchTab([...tabs.keys()][startup.active] ?? [...tabs.keys()][0], false)
   initializing = false
+  registerLinkWindow(window, (url) => {
+    const active = tabs.get(activeTabId)
+    if (tabs.size === 1 && active && !active.state.url && !active.state.incognito) {
+      load(url, activeTabId)
+    } else newTab(url)
+  })
   publish()
   return chrome.webContents
 }

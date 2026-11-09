@@ -1,6 +1,7 @@
 import type { SearchMode, SearchResponse, SearchResult, SearchShortcut } from './search'
 import type { Theme, ThemePatch } from './theme'
 import type { Preferences } from './preferences'
+import type { UpdateState } from './updates'
 import type { ContextMenuState } from './context-menu'
 import type { ExtensionState } from './extensions'
 import type { DownloadAction, DownloadRecord } from './downloads'
@@ -39,6 +40,11 @@ export interface SearchUpdate {
 }
 
 export interface BrowserAPI {
+  makeDefaultBrowser: () => Promise<void>
+  getUpdates: () => Promise<UpdateState>
+  checkForUpdates: () => Promise<UpdateState>
+  installUpdate: () => Promise<void>
+  onUpdates: (callback: (state: UpdateState) => void) => () => void
   getWebsitePermissions: (scope?: WebsitePermissionScope) => Promise<WebsitePermissionDecision[]>
   resetWebsitePermission: (
     decision: WebsitePermissionDecision,

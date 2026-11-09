@@ -17,6 +17,7 @@
   import ExtensionsIcon from './components/ExtensionsIcon.svelte'
   import ScrollArea from './components/ScrollArea.svelte'
   import FluidHover from './components/FluidHover.svelte'
+  import Morph from './components/Morph.svelte'
   import { extensions, watchExtensions } from './extensions'
   import { preferences } from './preferences'
   let tabs: BrowserTab[] = []
@@ -277,7 +278,9 @@
               {#if audibleTabIds.has(tab.id)}
                 <span class="tab-audio-space" aria-hidden="true"></span>
               {/if}
-              <span class="tab-title" class:error={!!tab.error}>{tab.title}</span>
+              <span class="tab-title" class:error={!!tab.error}
+                ><Morph text={tab.title} preset="title" /></span
+              >
               {#if tab.incognito && (tab.loading || tab.error || tab.discarded)}
                 <HatGlasses size={13} aria-label="Incognito tab" />
               {/if}

@@ -1,12 +1,11 @@
 import { writable } from 'svelte/store'
+import { actionError } from './errors'
 import type { CommandsState } from '../../shared/commands'
 
 export const commands = writable<CommandsState | null>(null)
 
 export function commandError(failure: unknown): string {
-  return failure instanceof Error
-    ? failure.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '')
-    : 'Could not complete the command action.'
+  return actionError(failure, 'Could not complete the command action.')
 }
 
 export function watchCommands(): () => void {

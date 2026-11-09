@@ -4,6 +4,7 @@
   import { Ellipsis, Search, Trash2 } from '@lucide/svelte'
   import { Button, Card, Select, SettingRow, Switch } from './components/ui'
   import SiteIcon from './components/SiteIcon.svelte'
+  import Morph from './components/Morph.svelte'
   import { preferences, updatePreferences } from './preferences'
   import { historyPageSize } from '../../shared/history'
   import type { HistoryPage, HistoryRemoval, HistoryVisit } from '../../shared/history'
@@ -313,7 +314,7 @@
 
   {#if selected.size}
     <div class="selection-bar">
-      <span>{selected.size} selected</span>
+      <span><Morph text={`${selected.size} selected`} preset="counter" /></span>
       <Button
         disabled={busy || loading}
         on:click={async () => {
@@ -419,9 +420,12 @@
         }}>Previous</Button
       >
       <span
-        >{Math.floor(offset / historyPageSize) + 1} / {Math.ceil(
-          result.total / historyPageSize
-        )}</span
+        ><Morph
+          text={`${Math.floor(offset / historyPageSize) + 1} / ${Math.ceil(
+            result.total / historyPageSize
+          )}`}
+          preset="counter"
+        /></span
       >
       <Button
         disabled={busy || loading || offset + historyPageSize >= result.total}
@@ -432,7 +436,9 @@
       >
     </nav>
   {/if}
-  {#if status}<p class="history-status" role="status">{status}</p>{/if}
+  <p class="history-status" hidden={!status} role="status">
+    <Morph text={status} preset="action" />
+  </p>
 </section>
 
 <style>

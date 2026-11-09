@@ -8,6 +8,22 @@
   export let mode: 'browser' | 'search' | 'downloads' | 'privacy'
   let choosingFolder = false
   let homepageError = ''
+  let settingDefault = false
+  let defaultBrowserMessage = ''
+  async function makeDefaultBrowser(): Promise<void> {
+    settingDefault = true
+    defaultBrowserMessage = ''
+    try {
+      await window.api.makeDefaultBrowser()
+      defaultBrowserMessage =
+        'Confirm Rei for HTTP and HTTPS links in your system settings if prompted.'
+    } catch (error) {
+      defaultBrowserMessage =
+        error instanceof Error ? error.message : 'Could not change the default browser.'
+    } finally {
+      settingDefault = false
+    }
+  }
   async function saveHomepage(value: string): Promise<void> {
     try {
       parsePreferences({ newTabUrl: value })
@@ -47,6 +63,14 @@
 </script>
 
 {#if mode === 'browser'}
+  <Card>
+    <SettingRow title="Default browser" description="Open links from other apps in Rei.">
+      <Button busy={settingDefault} on:click={makeDefaultBrowser}>Make default</Button>
+    </SettingRow>
+    {#if defaultBrowserMessage}<p class="rei-description" role="status">
+        {defaultBrowserMessage}
+      </p>{/if}
+  </Card>
   <StartupSettings />
   <Card
     ><SettingRow title="New-tab page" control="new-tab-url" stacked>
@@ -168,7 +192,21 @@
         on:change={(event) => updatePreferences({ historyEnabled: event.detail })}
       /></SettingRow
     >
-    <SettingRow title="Send Do Not Track" control="do-not-track"
+    <SettingRow
+      title="Do not sell or share my data"
+      description="Sends Global Privacy Control (GPC) to websites."
+      control="global-privacy-control"
+      ><Switch
+        id="global-privacy-control"
+        label="Do not sell or share my data"
+        checked={$preferences.globalPrivacyControl}
+        on:change={(event) => updatePreferences({ globalPrivacyControl: event.detail })}
+      /></SettingRow
+    >
+    <SettingRow
+      title="Send Do Not Track"
+      description="Websites may ignore this request."
+      control="do-not-track"
       ><Switch
         id="do-not-track"
         label="Send Do Not Track requests"

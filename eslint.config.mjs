@@ -4,7 +4,15 @@ import eslintConfigPrettier from '@electron-toolkit/eslint-config-prettier'
 import eslintPluginSvelte from 'eslint-plugin-svelte'
 
 export default defineConfig(
-  { ignores: ['**/node_modules', '**/dist', '**/out', 'resources/extensions/uBlock0.chromium/**'] },
+  {
+    ignores: [
+      '**/node_modules',
+      '**/dist',
+      '**/out',
+      '**/.cache',
+      'resources/extensions/uBlock0.chromium/**'
+    ]
+  },
   tseslint.configs.recommended,
   eslintPluginSvelte.configs['flat/recommended'],
   {

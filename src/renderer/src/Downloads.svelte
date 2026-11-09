@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { actionError } from './errors'
   import { onMount } from 'svelte'
   import {
     Download,
@@ -18,14 +19,14 @@
   import { theme } from './theme'
   import { preferences } from './preferences'
   import ScrollArea from './components/ScrollArea.svelte'
-  import { Button, Card, Select } from './components/ui'
+  import Morph from './components/Morph.svelte'
+  import { Button, Card } from './components/ui'
 
   export let persistentTopbar = false
   let page: HTMLElement
   let records: DownloadRecord[] = []
   let loaded = false
   let query = ''
-  let filter = 'all'
   let error = ''
   let feedback = ''
   let busy = ''
@@ -36,16 +37,8 @@
     completed: 'Completed',
     cancelled: 'Cancelled'
   }
-  $: active = records.filter((record) => record.active).length
-  $: visible = records.filter(
-    (record) =>
-      (filter === 'all' ||
-        (filter === 'active'
-          ? record.active
-          : filter === 'completed'
-            ? record.status === 'completed'
-            : !record.active && record.status !== 'completed')) &&
-      `${record.filename} ${record.url}`.toLowerCase().includes(query.toLowerCase().trim())
+  $: visible = records.filter((record) =>
+    `${record.filename} ${record.url}`.toLowerCase().includes(query.toLowerCase().trim())
   )
 
   onMount(() => {
@@ -84,10 +77,7 @@
       await action()
       feedback = message
     } catch (reason) {
-      error =
-        reason instanceof Error
-          ? reason.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '')
-          : 'Could not complete this action. Try again.'
+      error = actionError(reason, 'Could not complete this action. Try again.')
     } finally {
       busy = ''
     }
@@ -118,7 +108,6 @@
       <header>
         <div>
           <h1>Downloads</h1>
-          {#if active}<p class="summary">{active} in progress</p>{/if}
         </div>
         <div class="toolbar">
           <Button
@@ -148,26 +137,6 @@
             spellcheck={false}
           />
         </label>
-        <Select
-          id="download-filter"
-          label="Filter downloads"
-          value={filter}
-          options={[
-            { value: 'all', label: 'All downloads' },
-            { value: 'active', label: 'In progress' },
-            { value: 'completed', label: 'Completed' },
-            { value: 'stopped', label: 'Interrupted / cancelled' }
-          ]}
-          on:change={(event) => (filter = event.detail)}
-        />
-      </div>
-
-      <div class="history-tools">
-        <p>
-          {loaded
-            ? `${visible.length} ${visible.length === 1 ? 'download' : 'downloads'}`
-            : 'Loading downloads\u2026'}
-        </p>
         <Button
           disabled={!!busy || !records.some((record) => !record.active)}
           title="Remove finished entries, not files"
@@ -180,14 +149,16 @@
         >
       </div>
       {#if error}<p class="error" role="alert">{error}</p>{/if}
-      <p class="feedback" role="status">{feedback}</p>
+      <p class="feedback" class:empty={!feedback} role="status">
+        <Morph text={feedback} preset="action" />
+      </p>
 
       {#if loaded && visible.length === 0}
         <Card>
           <div class="empty">
             <Download size={24} strokeWidth={1.5} aria-hidden="true" />
             <h2>{records.length ? 'No matching downloads' : 'No downloads yet'}</h2>
-            {#if records.length}<p>Try another search or filter.</p>{/if}
+            {#if records.length}<p>Try another search.</p>{/if}
           </div>
         </Card>
       {:else}
@@ -198,30 +169,43 @@
                 <div class="download-entry">
                   <File class="file-icon" size={20} strokeWidth={1.5} aria-hidden="true" />
                   <div class="file-content">
-                    <h2 title={record.path || record.filename}>{record.filename}</h2>
-                    <p class="source">
-                      {source(record.url)} &middot;
-                      <time datetime={new Date(record.started).toISOString()}
-                        >{new Date(record.started).toLocaleString(undefined, {
-                          dateStyle: 'medium',
-                          timeStyle: 'short'
-                        })}</time
-                      >
-                    </p>
+                    <div class="file-heading">
+                      <h2 title={record.path || record.filename}>{record.filename}</h2>
+                      <p class="source">
+                        {source(record.url)} &middot;
+                        <time datetime={new Date(record.started).toISOString()}
+                          >{new Date(record.started).toLocaleString(undefined, {
+                            dateStyle: 'medium',
+                            timeStyle: 'short'
+                          })}</time
+                        >
+                      </p>
+                    </div>
                     <p class="transfer" class:failed={record.status === 'interrupted'}>
                       <span
-                        >{record.status === 'progressing' && record.stage === 'preparing'
-                          ? 'Preparing media'
-                          : record.status === 'progressing' && record.stage === 'processing'
-                            ? 'Processing media'
-                            : statuses[record.status]}</span
+                        ><Morph
+                          text={record.status === 'progressing' && record.stage === 'preparing'
+                            ? 'Preparing media'
+                            : record.status === 'progressing' && record.stage === 'processing'
+                              ? 'Processing media'
+                              : statuses[record.status]}
+                        /></span
                       >
-                      &middot; {downloadBytes(record.received)}{record.total > 0 &&
-                      record.status !== 'completed'
-                        ? ` / ${downloadBytes(record.total)}`
-                        : ''}
+                      &middot; <Morph
+                        preset="counter"
+                        throttle={record.active ? 200 : 0}
+                        text={`${downloadBytes(record.received)}${
+                          record.total > 0 && record.status !== 'completed'
+                            ? ` / ${downloadBytes(record.total)}`
+                            : ''
+                        }`}
+                      />
                       {#if record.status === 'progressing' && record.speed > 0}
-                        &middot; {downloadBytes(record.speed)}/s {downloadRemaining(record)}{/if}
+                        &middot; <Morph
+                          preset="counter"
+                          throttle={200}
+                          text={`${downloadBytes(record.speed)}/s ${downloadRemaining(record)}`}
+                        />{/if}
                     </p>
                     {#if record.error}<p class="error" role="alert">{record.error}</p>{/if}
                     {#if record.active}
@@ -334,15 +318,13 @@
   header,
   .toolbar,
   .filters,
-  .history-tools,
   .file-actions {
     display: flex;
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
   }
-  header,
-  .history-tools {
+  header {
     justify-content: space-between;
   }
   header {
@@ -367,9 +349,21 @@
     line-height: var(--rei-line-height, 1.5);
     overflow-wrap: anywhere;
   }
-  .summary,
   .source {
-    margin: 4px 0 0;
+    margin: 0;
+  }
+  .file-heading {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .file-heading h2 {
+    min-width: 0;
+  }
+  .file-heading .source {
+    text-align: right;
   }
   .search {
     flex: 1;
@@ -378,18 +372,13 @@
   .search input {
     width: 100%;
   }
-  .history-tools {
-    margin: 14px 0;
-  }
-  .history-tools p {
-    margin: 0;
-  }
   .download-list {
     list-style: none;
     padding: 0;
     margin: 0;
     display: grid;
     gap: 12px;
+    margin-top: 16px;
   }
   .download-list > li {
     content-visibility: auto;
@@ -470,7 +459,7 @@
   .feedback {
     margin: 0 0 12px;
   }
-  .feedback:empty {
+  .feedback.empty {
     margin: 0;
   }
   .history-note {

@@ -1,8 +1,10 @@
 <script lang="ts">
+  import { actionError } from './errors'
   import { defaultTheme, maxWallpaperBytes } from '../../shared/theme'
   import type { Theme, ThemePatch } from '../../shared/theme'
   import { palette, theme, themeError, updateTheme, wallpaperSource } from './theme'
   import AppearanceOptions from './AppearanceOptions.svelte'
+  import Morph from './components/Morph.svelte'
   import { smoothText } from './smoothText'
   import { Button, Card, Select, SettingRow, Slider, Switch } from './components/ui'
 
@@ -64,10 +66,7 @@
       await window.api.openThemeFile()
       fileError = ''
     } catch (error) {
-      fileError =
-        error instanceof Error
-          ? error.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '')
-          : 'Could not open theme.json.'
+      fileError = actionError(error, 'Could not open theme.json.')
     } finally {
       openingFile = false
     }
@@ -120,11 +119,14 @@
   <Card>
     <SettingRow title="Blank-page wallpaper" description="PNG, JPEG, or WebP. Up to 6 MB.">
       <Button busy={loadingImage} on:click={() => fileInput.click()}
-        >{loadingImage
-          ? 'Opening image\u2026'
-          : $theme.wallpaper
-            ? 'Replace image'
-            : 'Choose image'}</Button
+        ><Morph
+          preset="action"
+          text={loadingImage
+            ? 'Opening image\u2026'
+            : $theme.wallpaper
+              ? 'Replace image'
+              : 'Choose image'}
+        /></Button
       >
       {#if $theme.wallpaper}<Button on:click={() => updateTheme({ wallpaper: null })}>Remove</Button
         >{/if}
@@ -192,7 +194,6 @@
         name="caret-preview"
         autocomplete="off"
         spellcheck={false}
-        placeholder="Click here to try the text cursor"
       />
     </div></Card
   >

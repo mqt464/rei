@@ -57,7 +57,7 @@ function save(patch: unknown): Preferences {
   }
   preferences = next
   if (!next.downloadHistory) clearDownloadHistory()
-  setExtensionDoNotTrack(next.doNotTrack)
+  setExtensionDoNotTrack(next.doNotTrack, next.globalPrivacyControl)
   for (const session of sessions) {
     session.setSpellCheckerEnabled(next.spellcheck)
     session.setDownloadPath(next.downloadDirectory || app.getPath('downloads'))
@@ -73,6 +73,22 @@ function save(patch: unknown): Preferences {
 export function registerSessionPreferences(session: Session, incognito = false): void {
   if (!sessions.has(session)) {
     sessions.add(session)
+    if (incognito) {
+      session.webRequest.onBeforeSendHeaders((details, callback) => {
+        const { doNotTrack, globalPrivacyControl } = currentPreferences()
+        const headers = { ...details.requestHeaders }
+        for (const name of Object.keys(headers)) {
+          if (
+            (doNotTrack && name.toLowerCase() === 'dnt') ||
+            (globalPrivacyControl && name.toLowerCase() === 'sec-gpc')
+          )
+            delete headers[name]
+        }
+        if (doNotTrack) headers.DNT = '1'
+        if (globalPrivacyControl) headers['Sec-GPC'] = '1'
+        callback({ requestHeaders: headers })
+      })
+    }
     session.setSpellCheckerEnabled(currentPreferences().spellcheck)
     session.setDownloadPath(currentPreferences().downloadDirectory || app.getPath('downloads'))
     session.on('will-download', (_event, item, source) => {

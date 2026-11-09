@@ -3,6 +3,7 @@
   import type { Theme, ThemePatch } from '../../shared/theme'
   import { theme, themeError, updateTheme, wallpaperError } from './theme'
   import { Button, Card, Select, SettingRow, Slider, Switch } from './components/ui'
+  import { textMorphCategories } from '../../shared/textMorph'
 
   export let mode: 'appearance' | 'wallpaper' = 'appearance'
   let choosingFolder = false
@@ -94,7 +95,10 @@
       'webpageFont',
       'font',
       'colors',
-      'paletteMode'
+      'paletteMode',
+      'textMorphing',
+      'textMorphStyle',
+      ...textMorphCategories.map((entry) => entry.key)
     ] as (keyof Theme)[]
     const patch: ThemePatch = {}
     for (const key of keys) Object.assign(patch, { [key]: defaultTheme[key] })
@@ -158,6 +162,40 @@
   </Card>
   {#if $wallpaperError}<p class="rei-description" role="alert">{$wallpaperError}</p>{/if}
 {:else}
+  <h2>Text morphing</h2>
+  <Card>
+    <SettingRow
+      title="Enable text morphing"
+      control="text-morphing"
+      description="Animate changing interface text."
+    >
+      <Switch
+        id="text-morphing"
+        label="Enable text morphing"
+        checked={$theme.textMorphing}
+        on:change={(event) => set('textMorphing', event.detail)}
+      />
+    </SettingRow>
+    <SettingRow title="Style" control="text-morph-style" description="Choose the animation feel.">
+      <Select
+        id="text-morph-style"
+        label="Text morphing style"
+        value={$theme.textMorphStyle}
+        options={options(['subtle', 'balanced', 'expressive'])}
+        on:change={(event) => set('textMorphStyle', event.detail)}
+      />
+    </SettingRow>
+    {#each textMorphCategories as entry (entry.key)}
+      <SettingRow title={entry.label} description={entry.description} control={entry.key}>
+        <Switch
+          id={entry.key}
+          label={`Morph ${entry.label.toLowerCase()}`}
+          checked={$theme[entry.key]}
+          on:change={(event) => set(entry.key, event.detail)}
+        />
+      </SettingRow>
+    {/each}
+  </Card>
   {#each groups as group (group.title)}
     <h2>{group.title}</h2>
     <Card>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { actionError } from './errors'
   import type { SearchShortcut } from '../../shared/search'
   import { Button, Card, SettingRow } from './components/ui'
 
@@ -13,10 +14,7 @@
     try {
       await window.api.openShortcutsFile()
     } catch (error) {
-      openError =
-        error instanceof Error
-          ? error.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '')
-          : 'Could not open site-search.json.'
+      openError = actionError(error, 'Could not open site-search.json.')
     } finally {
       opening = false
     }

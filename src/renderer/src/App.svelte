@@ -1,5 +1,6 @@
 <script lang="ts">
   import { theme } from './theme'
+  import Morph from './components/Morph.svelte'
   import { afterUpdate, onMount, tick } from 'svelte'
   import { HatGlasses, SlidersHorizontal, Terminal } from '@lucide/svelte'
   import { commandResults } from '../../shared/commands'
@@ -37,6 +38,7 @@
   let error = ''
   let addressInput: HTMLInputElement
   let addressWidth = 280
+  let addressTextWidth = 0
   const addressMeasure = document.createElement('canvas').getContext('2d')
   let caretFocused = false
   let suggestions: (SearchResult | CommandResult)[] = []
@@ -185,10 +187,9 @@
     const context = addressMeasure
     if (context) {
       context.font = style.font
-      const width = Math.max(
-        280,
-        Math.ceil(context.measureText(address || addressInput.placeholder).width + 24)
-      )
+      const textWidth = Math.ceil(context.measureText(address || addressInput.placeholder).width)
+      if (textWidth !== addressTextWidth) addressTextWidth = textWidth
+      const width = Math.max(280, textWidth + 24)
       if (width !== addressWidth) addressWidth = width
     }
     updateOverlayHeight()
@@ -585,7 +586,7 @@
     class="address-bar"
     class:has-shortcut={!!activeShortcut}
     class:focused={caretFocused}
-    style={`--address-width: ${addressWidth}px`}
+    style={`--address-width: ${addressWidth}px; --address-text-width: ${addressTextWidth}px`}
     on:submit={navigate}
   >
     {#if siteOrigin && !activeShortcut}
@@ -608,8 +609,9 @@
         title={`Backspace to return to ${activeShortcut.keyword}`}
         aria-label={`Exit ${activeShortcut.title} site search`}
         on:mousedown|preventDefault
-        on:click={exitShortcut}>{`${activeShortcut.title} | `}</button
-      >
+        on:click={exitShortcut}
+        ><Morph text={activeShortcut.title} /> |
+      </button>
     {/if}
     {#if incognito}
       <span class="incognito-indicator" title="Incognito: history is not saved">
@@ -632,6 +634,12 @@
       spellcheck={false}
       on:blur={blurAddress}
       on:focus={focusAddress}
+      on:mousedown={(event) => {
+        if (caretFocused || event.button !== 0) return
+        event.preventDefault()
+        addressInput.focus()
+        addressInput.select()
+      }}
       on:input={updateSuggestions}
       on:beforeinput={handleBeforeInput}
       on:compositionend={() => updateSuggestions(new Event('input'))}
@@ -721,21 +729,23 @@
     </ScrollArea>
     {#if !suggestions.length}
       <p class="search-status" role="status">
-        {!activeShortcut && address.trim().startsWith('/')
-          ? !$commands
-            ? 'Loading commands…'
-            : 'No matching commands. Add commands in Settings → Commands.'
-          : activeShortcut && !address.trim()
-            ? `Type to search ${activeShortcut.title}.`
-            : selectedMode === 'tabs'
-              ? 'No matching open tabs.'
-              : selectedMode === 'history'
-                ? 'No matching history.'
-                : pendingResults
-                  ? 'Getting suggestions\u2026'
-                  : !address.trim()
-                    ? 'Type to search this mode.'
-                    : 'No results in this mode.'}
+        <Morph
+          text={!activeShortcut && address.trim().startsWith('/')
+            ? !$commands
+              ? 'Loading commands…'
+              : 'No matching commands. Add commands in Settings → Commands.'
+            : activeShortcut && !address.trim()
+              ? `Type to search ${activeShortcut.title}.`
+              : selectedMode === 'tabs'
+                ? 'No matching open tabs.'
+                : selectedMode === 'history'
+                  ? 'No matching history.'
+                  : pendingResults
+                    ? 'Getting suggestions\u2026'
+                    : !address.trim()
+                      ? 'Type to search this mode.'
+                      : 'No results in this mode.'}
+        />
       </p>
     {/if}
   </section>

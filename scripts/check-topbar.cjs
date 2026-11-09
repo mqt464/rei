@@ -53,6 +53,7 @@ app.whenReady().then(async () => {
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
     const chrome = browserModule.exports.attachBrowser(window, store)
     await chrome.loadFile(path.resolve(__dirname, '../out/renderer/index.html'))
+    await chrome.insertCSS('.topbar { transition: none !important; }')
     const read = (script) => chrome.executeJavaScript(script)
     await read(`window.api.navigate('http://127.0.0.1:${server.address().port}/')`)
     await waitFor(() => window.contentView.children.length === 3, 'page must exist')
@@ -88,6 +89,53 @@ app.whenReady().then(async () => {
     }
     assert.deepEqual(failures, [])
     await waitFor(() => page.getBounds().y === 38, 'revealing must expand chrome')
+    await waitFor(
+      () => read('document.querySelector(".topbar").getBoundingClientRect().top === 0'),
+      'bar must finish revealing before clicking text'
+    )
+    const textHitbox = await read(`(() => {
+      const input = document.querySelector('input');
+      const bounds = input.getBoundingClientRect();
+      const style = getComputedStyle(input);
+      const context = document.createElement('canvas').getContext('2d');
+      context.font = style.font;
+      const blank = document.elementFromPoint(bounds.right + 20, bounds.y + bounds.height / 2);
+      return {
+        x: Math.round(bounds.x + bounds.width / 2),
+        y: Math.round(bounds.y + bounds.height / 2),
+        width: bounds.width,
+        textWidth: Math.ceil(context.measureText(input.value || input.placeholder).width),
+        blankRegion: getComputedStyle(blank).webkitAppRegion,
+        textRegion: style.webkitAppRegion
+      };
+    })()`)
+    assert.equal(textHitbox.width, textHitbox.textWidth, 'idle hitbox must cover only text')
+    assert.equal(textHitbox.textRegion, 'no-drag', 'text must receive clicks')
+    assert.equal(textHitbox.blankRegion, 'drag', 'blank space beside text must drag the window')
+    chrome.focus()
+    chrome.sendInputEvent({
+      type: 'mouseDown',
+      x: textHitbox.x,
+      y: textHitbox.y,
+      button: 'left',
+      clickCount: 1
+    })
+    chrome.sendInputEvent({
+      type: 'mouseUp',
+      x: textHitbox.x,
+      y: textHitbox.y,
+      button: 'left',
+      clickCount: 1
+    })
+    await waitFor(
+      () =>
+        read(`(() => {
+      const input = document.querySelector('input');
+      return document.activeElement === input && input.selectionStart === 0 && input.selectionEnd === input.value.length;
+    })()`),
+      'clicking text must focus and select the whole address'
+    )
+    await read('document.activeElement.blur()')
     await read(`
       const input = document.querySelector('input');
       input.value = 'https://example.com/' + 'long-path/'.repeat(100);

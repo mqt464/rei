@@ -9,6 +9,7 @@ export const searchEngines = {
 }
 
 export interface Preferences {
+  automaticUpdates: boolean
   keybindings: Keybindings
   searchEngine: keyof typeof searchEngines
   newTabUrl: string
@@ -24,6 +25,7 @@ export interface Preferences {
   downloadHistory: boolean
   historyEnabled: boolean
   doNotTrack: boolean
+  globalPrivacyControl: boolean
   startup: 'blank' | 'restore' | 'pages'
   startupPages: string[]
   tabSleeping: boolean
@@ -34,6 +36,7 @@ export interface Preferences {
 }
 
 export const defaultPreferences: Preferences = {
+  automaticUpdates: true,
   keybindings: defaultKeybindings,
   searchEngine: 'google',
   newTabUrl: '',
@@ -49,6 +52,7 @@ export const defaultPreferences: Preferences = {
   downloadHistory: true,
   historyEnabled: true,
   doNotTrack: false,
+  globalPrivacyControl: false,
   startup: 'blank',
   startupPages: [],
   tabSleeping: true,

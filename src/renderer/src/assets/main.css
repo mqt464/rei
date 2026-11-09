@@ -55,6 +55,15 @@ body {
   -webkit-app-region: no-drag;
 }
 
+.address-bar:not(.focused) input {
+  flex-basis: var(--address-text-width);
+  width: var(--address-text-width);
+  max-width: calc(100% - 24px);
+  height: 1lh;
+  margin: 0 12px;
+  padding: 0;
+}
+
 .incognito-indicator {
   display: flex;
   flex-shrink: 0;
@@ -234,6 +243,7 @@ body {
 }
 
 .suggestion-panel {
+  --rei-hover-radius: 0;
   z-index: 3;
   position: absolute;
   top: var(--rei-topbar-height, 38px);

@@ -1,4 +1,5 @@
 import { writable } from 'svelte/store'
+import { actionError } from './errors'
 import { defaultPreferences } from '../../shared/preferences'
 import type { Preferences } from '../../shared/preferences'
 
@@ -20,11 +21,7 @@ export async function updatePreferences(patch: Partial<Preferences>): Promise<bo
     preferenceError.set('')
     return true
   } catch (error) {
-    preferenceError.set(
-      error instanceof Error
-        ? error.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '')
-        : 'Could not save preferences. Try again.'
-    )
+    preferenceError.set(actionError(error, 'Could not save preferences. Try again.'))
     return false
   }
 }

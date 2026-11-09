@@ -10,12 +10,16 @@
     "url": "https://github.com/mqt464/rei.git"
   },
   "scripts": {
+    "check:fullscreen": "node scripts/check-website-permissions.cjs && node scripts/check-fullscreen.cjs",
+    "check:default-browser": "node scripts/check-default-browser.cjs",
     "prototype:commands": "node scripts/prototype-commands.cjs",
     "check:commands": "node scripts/check-playing-media.cjs && node scripts/check-commands.cjs",
+    "check:updates": "node scripts/check-updates.cjs && node scripts/check-update-settings.cjs",
+    "check:text-morph": "node scripts/check-text-morph.cjs && node scripts/check-text-morph-dom.cjs",
     "format": "prettier --plugin prettier-plugin-svelte --write .",
     "lint": "eslint --cache .",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
-    "svelte-check": "svelte-check --tsconfig ./tsconfig.json",
+    "svelte-check": "svelte-check --tsconfig ./tsconfig.web.json",
     "typecheck": "npm run typecheck:node && npm run svelte-check",
     "start": "electron-vite preview",
     "dev": "electron-vite dev",
@@ -34,6 +38,7 @@
     "electron-chrome-context-menu": "^1.1.0",
     "electron-chrome-extensions": "^4.10.0",
     "electron-chrome-web-store": "^0.13.0",
+    "electron-updater": "^6.8.11",
     "torph": "^0.1.3"
   },
   "devDependencies": {

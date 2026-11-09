@@ -1,5 +1,7 @@
 import { ipcRenderer } from 'electron'
 import './playing-media'
+import './scrollbars'
+import './privacy'
 import { createKeybindMatcher, defaultKeybindings } from '../shared/keyboard'
 import type { Keybindings } from '../shared/keyboard'
 

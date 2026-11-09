@@ -28,7 +28,7 @@ const browserModule = new Module(bundlePath, module)
 browserModule.filename = bundlePath
 browserModule.paths = Module._nodeModulePaths(path.dirname(bundlePath))
 browserModule._compile(
-  `${bundle}\nmodule.exports = { attachBrowser, SearchStore, SearchService, TabSnapshotStore, flush };`,
+  `${bundle}\nmodule.exports = { attachBrowser, SearchStore, SearchService, TabSnapshotStore, flush, startLinkRouting, finishLinkRouting };`,
   bundlePath
 )
 app.setPath('userData', process.env.REI_INCOGNITO_PROFILE)
@@ -82,12 +82,25 @@ app.whenReady().then(async () => {
     const state = () => read('window.privateState')
     await waitFor(async () => (await state())?.tabs.length === 1, 'initial tab must load')
     const normalId = (await state()).activeTabId
-    await read(`window.api.navigate('${origin}/normal')`)
+    assert.equal(browserModule.exports.startLinkRouting(), true)
+    browserModule.exports.finishLinkRouting(() =>
+      assert.fail('External links must reuse the window')
+    )
+    app.emit(
+      'open-url',
+      {
+        preventDefault() {
+          return undefined
+        }
+      },
+      `${origin}/normal`
+    )
     await waitFor(
       () => store.history('normal').some((entry) => entry.url === `${origin}/normal`),
       'normal history must still work'
     )
     await session.defaultSession.cookies.set({ url: origin, name: 'normal', value: 'secret' })
+    assert.equal((await state()).tabs.length, 1, 'external link must reuse an empty normal tab')
     window.show()
     window.focus()
     chrome.focus()
@@ -119,10 +132,7 @@ app.whenReady().then(async () => {
       'sidebar must not have an incognito button'
     )
     await read('window.api.newIncognitoTab()')
-    await waitFor(
-      async () => (await state()).tabs.length === 3,
-      'API must create incognito tabs'
-    )
+    await waitFor(async () => (await state()).tabs.length === 3, 'API must create incognito tabs')
     current = await state()
     const secondId = current.activeTabId
     assert.equal(webContents.fromId(current.activeWebContentsId).session, privateSession)
@@ -254,6 +264,24 @@ app.whenReady().then(async () => {
     current = await state()
     assert.equal(current.tabs.find((tab) => tab.id === current.activeTabId).incognito, true)
     assert.equal(current.url, '')
+    const beforeExternal = current.tabs.length
+    app.emit(
+      'open-url',
+      {
+        preventDefault() {
+          return undefined
+        }
+      },
+      `${origin}/external`
+    )
+    await waitFor(
+      async () => (await state()).url === `${origin}/external` && !(await state()).loading,
+      'external link must load while an incognito tab is active'
+    )
+    current = await state()
+    assert.equal(current.tabs.length, beforeExternal + 1)
+    assert.equal(current.tabs.find((tab) => tab.id === current.activeTabId).incognito, false)
+    assert.equal(webContents.fromId(current.activeWebContentsId).session, session.defaultSession)
     await read('window.api.openSettings()')
     await waitFor(
       () => read('!!document.querySelector("#settings-tab-privacy")'),

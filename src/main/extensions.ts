@@ -1,4 +1,4 @@
-import { app, BaseWindow, dialog, nativeImage, screen, session, webContents } from 'electron'
+import { app, BaseWindow, dialog, nativeImage, session, webContents } from 'electron'
 import type { BrowserWindow, Extension, IpcMainInvokeEvent, Rectangle, WebContents } from 'electron'
 import type { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
@@ -17,13 +17,19 @@ export const ublockId = 'fkgkibajhfbepljeaefdnfnegdcjomkh'
 export const uiPartition = 'persist:rei-ui'
 const extensionIdPattern = /^[a-p]{32}$/
 let doNotTrack = false
+let globalPrivacyControl = false
 let privacyId = ''
 
-export function setExtensionDoNotTrack(enabled: boolean): void {
+export function setExtensionDoNotTrack(enabled: boolean, globalPrivacy = false): void {
   doNotTrack = enabled
+  globalPrivacyControl = globalPrivacy
   for (const contents of webContents.getAllWebContents()) {
     if (privacyId && contents.getURL().startsWith(`chrome-extension://${privacyId}/`))
-      void contents.executeJavaScript(`globalThis.reiDoNotTrack = ${enabled}`).catch(console.error)
+      void contents
+        .executeJavaScript(
+          `globalThis.reiDoNotTrack = ${enabled}; globalThis.reiGlobalPrivacyControl = ${globalPrivacy}`
+        )
+        .catch(console.error)
   }
 }
 
@@ -132,14 +138,16 @@ export class ExtensionRuntime {
       (
         popup: EventEmitter & {
           browserWindow?: BrowserWindow
+          parent?: BaseWindow
         }
       ) => {
         const window = popup.browserWindow
-        if (!window) return
+        const parent = popup.parent
+        if (!window || !parent) return
         popup.on('will-resize', (size: Pick<Rectangle, 'width' | 'height'>) => {
-          if (window.isDestroyed()) return
+          if (window.isDestroyed() || parent.isDestroyed()) return
           const current = window.getBounds()
-          const area = screen.getDisplayMatching(current).workArea
+          const area = parent.getContentBounds()
           if (size.width === 25 && size.height === 25) {
             size.width = current.width
             size.height = current.height
@@ -148,9 +156,9 @@ export class ExtensionRuntime {
           size.height = Math.min(area.height, size.height)
         })
         popup.on('will-move', (position: { x: number; y: number }) => {
-          if (window.isDestroyed()) return
+          if (window.isDestroyed() || parent.isDestroyed()) return
           const bounds = window.getBounds()
-          const area = screen.getDisplayMatching(bounds).workArea
+          const area = parent.getContentBounds()
           position.x = Math.max(area.x, Math.min(position.x, area.x + area.width - bounds.width))
           position.y = Math.max(area.y, Math.min(position.y, area.y + area.height - bounds.height))
         })
@@ -170,7 +178,9 @@ export class ExtensionRuntime {
       contents.on('did-finish-load', () => {
         if (privacyId && contents.getURL().startsWith(`chrome-extension://${privacyId}/`))
           void contents
-            .executeJavaScript(`globalThis.reiDoNotTrack = ${doNotTrack}`)
+            .executeJavaScript(
+              `globalThis.reiDoNotTrack = ${doNotTrack}; globalThis.reiGlobalPrivacyControl = ${globalPrivacyControl}`
+            )
             .catch(console.error)
       })
     })
@@ -287,7 +297,7 @@ export class ExtensionRuntime {
       join(this.bundledPath, 'rei-privacy')
     )
     privacyId = privacy.id
-    setExtensionDoNotTrack(doNotTrack)
+    setExtensionDoNotTrack(doNotTrack, globalPrivacyControl)
     await this.proxy.whenReady()
     this.starting = false
     this.save()

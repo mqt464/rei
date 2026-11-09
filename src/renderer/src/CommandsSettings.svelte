@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Morph from './components/Morph.svelte'
   import { tick } from 'svelte'
   import { FolderOpen } from '@lucide/svelte'
   import { commands, commandError } from './commands'
@@ -103,7 +104,7 @@
     </Button>
   </div>
 </fieldset>
-<p class="feedback" role="status">{status}</p>
+<p class="feedback" role="status"><Morph text={status} preset="action" /></p>
 {#if error || $commands?.error}<p class="error" role="alert">{error || $commands?.error}</p>{/if}
 
 <style>

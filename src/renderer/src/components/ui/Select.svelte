@@ -1,5 +1,6 @@
 <script lang="ts">
   import FluidHover from '../FluidHover.svelte'
+  import Morph from '../Morph.svelte'
   import ScrollArea from '../ScrollArea.svelte'
   import { createEventDispatcher, onMount, tick } from 'svelte'
   import { Check, ChevronDown } from '@lucide/svelte'
@@ -125,10 +126,12 @@
     }
   }}
 >
-  <span>{options.find((option) => option.value === value)?.label ?? value}</span><ChevronDown
-    size={13}
-    aria-hidden="true"
-  />
+  <span
+    ><Morph
+      text={options.find((option) => option.value === value)?.label ?? value}
+      category="textMorphSettings"
+    /></span
+  ><ChevronDown size={13} aria-hidden="true" />
 </button>
 {#if opened}
   <div

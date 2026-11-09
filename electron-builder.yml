@@ -10,6 +10,7 @@ extraResources:
   - from: resources/sources
     to: sources
 files:
+  - out/**
   - '!resources/commands/**'
   - '!resources/extensions/**'
   - '!resources/sources/**'
@@ -24,9 +25,13 @@ files:
 asarUnpack:
   - resources/**
 win:
+  target:
+    - nsis
+    - portable
   executableName: rei
   icon: build/icon.ico
 nsis:
+  include: build/default-browser.nsh
   installerIcon: build/icon.ico
   uninstallerIcon: build/icon.ico
   installerHeaderIcon: build/icon.ico
@@ -34,7 +39,18 @@ nsis:
   shortcutName: ${productName}
   uninstallDisplayName: ${productName}
   createDesktopShortcut: always
+portable:
+  artifactName: ${name}-${version}-portable.${ext}
 mac:
+  protocols:
+    - name: Web links
+      schemes:
+        - http
+        - https
+      role: Viewer
+  target:
+    - dmg
+    - zip
   icon: build/icon.icns
   entitlementsInherit: build/entitlements.mac.plist
   extendInfo:
@@ -46,13 +62,18 @@ mac:
 dmg:
   artifactName: ${name}-${version}.${ext}
 linux:
+  protocols:
+    - name: Web links
+      schemes:
+        - http
+        - https
   icon: build/icon.png
   target:
     - AppImage
     - snap
     - deb
   maintainer: n/a
-  category: Utility
+  category: Network;WebBrowser
 appImage:
   artifactName: ${name}-${version}.${ext}
 npmRebuild: false

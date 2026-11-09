@@ -2,6 +2,7 @@
   import { onMount } from 'svelte'
   import {
     Download,
+    RefreshCw,
     History,
     Terminal,
     Gauge,
@@ -15,9 +16,11 @@
     Zap
   } from '@lucide/svelte'
   import ThemeEditor from './ThemeEditor.svelte'
+  import Morph from './components/Morph.svelte'
   import SiteSearchSettings from './SiteSearchSettings.svelte'
   import BrowserSettings from './BrowserSettings.svelte'
   import PerformanceSettings from './PerformanceSettings.svelte'
+  import UpdateSettings from './UpdateSettings.svelte'
   import ExtensionsSettings from './ExtensionsSettings.svelte'
   import ExtensionsIcon from './components/ExtensionsIcon.svelte'
   import KeybindSettings from './KeybindSettings.svelte'
@@ -50,7 +53,8 @@
     downloads: Download,
     history: History,
     extensions: ExtensionsIcon,
-    privacy: Shield
+    privacy: Shield,
+    updates: RefreshCw
   }
   let page: HTMLElement
   let clearing = false
@@ -152,6 +156,8 @@
                 <BrowserSettings mode={entry.id} />
               {:else if entry.id === 'performance'}
                 <PerformanceSettings />
+              {:else if entry.id === 'updates'}
+                <UpdateSettings />
               {:else if entry.id === 'extensions'}
                 <ExtensionsSettings />
               {:else if entry.id === 'keybinds'}
@@ -182,11 +188,16 @@
                 <Card
                   ><SettingRow title="Clear history and search data"
                     ><Button id="clear-search-data" busy={clearing} on:click={clearData}
-                      >{clearing ? 'Clearing\u2026' : 'Clear data\u2026'}</Button
+                      ><Morph
+                        text={clearing ? 'Clearing\u2026' : 'Clear data\u2026'}
+                        preset="action"
+                      /></Button
                     ></SettingRow
                   ></Card
                 >
-                <p class="feedback" role="status">{clearStatus}</p>
+                <p class="feedback" class:empty={!clearStatus} role="status">
+                  <Morph text={clearStatus} preset="action" />
+                </p>
                 {#if clearError}<p class="error" role="alert">{clearError}</p>{/if}
               {/if}
             {/if}
@@ -292,7 +303,7 @@
   .feedback {
     color: var(--rei-muted);
   }
-  .feedback:empty {
+  .feedback.empty {
     margin: 0;
   }
   .error {

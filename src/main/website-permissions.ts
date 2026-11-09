@@ -123,6 +123,7 @@ export function registerWebsitePermissions(
       !owners.has(contents)
     )
       return false
+    if (permission === 'fullscreen') return contents.isFocused()
     const origin = originOf(details.securityOrigin ?? details.requestingUrl ?? requestingOrigin)
     const topOrigin = originOf(contents.getURL())
     const permissions = permissionsFor(permission, details.mediaType ? [details.mediaType] : [])
@@ -143,6 +144,10 @@ export function registerWebsitePermissions(
       return
     }
     const window = owners.get(contents)
+    if (permission === 'fullscreen') {
+      callback(!!window && !window.isDestroyed() && contents.isFocused())
+      return
+    }
     const origin = originOf(
       'securityOrigin' in details && details.securityOrigin !== undefined
         ? details.securityOrigin

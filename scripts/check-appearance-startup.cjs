@@ -64,7 +64,7 @@ if (!process.versions.electron) {
       const server = createServer((request, response) => {
         response.setHeader('Content-Type', 'text/html')
         response.end(
-          `<title>Appearance fixture</title><body><p>Readable text</p><input value="unchanged"><select><option>Default</option><option>Other</option></select>${request.url === '/embedded' ? '' : '<iframe src="/embedded"></iframe>'}<div style="height:2000px"></div></body>`
+          `<!doctype html><title>Appearance fixture</title><style>html { scrollbar-color: rgb(170, 170, 170) rgb(15, 15, 15); }</style><body><p>Readable text</p><input value="unchanged"><select><option>Default</option><option>Other</option></select>${request.url === '/embedded' ? '' : '<iframe src="/embedded"></iframe>'}<div style="height:2000px"></div></body>`
         )
       })
       await new Promise((resolve) =>
@@ -210,6 +210,19 @@ if (!process.versions.electron) {
               'getComputedStyle(document.querySelector("p")).fontSize === "20px"'
             ),
           'website typography must apply'
+        )
+        await waitFor(
+          () =>
+            firstView.webContents.executeJavaScript(
+              'innerWidth - document.documentElement.clientWidth === 9'
+            ),
+          'the actual website scrollbar must follow Rei thickness despite website scrollbar colors'
+        )
+        assert.equal(
+          await firstView.webContents.executeJavaScript(
+            'getComputedStyle(document.documentElement, "::-webkit-scrollbar-thumb").backgroundColor'
+          ),
+          'rgb(170, 170, 170)'
         )
         await read('window.api.setTheme({sidebarIconsOnly:true})')
         await waitFor(

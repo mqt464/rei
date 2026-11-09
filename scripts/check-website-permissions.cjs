@@ -114,7 +114,13 @@ async function run() {
   assert.match(prompts[0].message, /https:\/\/site.test.*Camera, Microphone/)
   const promptCount = prompts.length
   assert.deepEqual(await request(normal, 'media', { mediaTypes: ['video', 'audio'] }), [true])
-  for (const permission of ['usb', 'display-capture', 'fullscreen', 'unknown']) {
+  assert.deepEqual(await request(normal, 'fullscreen'), [true])
+  assert.equal(check(normal, 'fullscreen'), true)
+  normal.contents.isFocused = () => false
+  assert.deepEqual(await request(normal, 'fullscreen'), [false])
+  assert.equal(check(normal, 'fullscreen'), false)
+  normal.contents.isFocused = () => true
+  for (const permission of ['usb', 'display-capture', 'unknown']) {
     assert.deepEqual(await request(normal, permission), [false])
     assert.equal(check(normal, permission), false)
   }

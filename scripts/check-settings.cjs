@@ -364,6 +364,35 @@ app.whenReady().then(async () => {
     )
     assert.equal(await read('document.activeElement.id'), 'settings-tab-privacy')
 
+    await read('window.api.navigate("rei://settings/updates")')
+    await waitFor(
+      () =>
+        read(
+          'document.querySelector("#settings-tab-updates").getAttribute("aria-selected") === "true" && !!document.querySelector("#automatic-updates")'
+        ),
+      'updates deep link must show update controls'
+    )
+    assert.equal(await read('window.api.getUpdates().then(value => value.status)'), 'unsupported')
+    assert.equal(
+      await read('document.querySelector(".settings-content .rei-button").disabled'),
+      true
+    )
+    await read('document.querySelector("#automatic-updates").click()')
+    await waitFor(
+      () => read('window.api.getPreferences().then(value => value.automaticUpdates === false)'),
+      'automatic update preference must save'
+    )
+    await read('document.querySelector("#automatic-updates").click()')
+    await waitFor(
+      () => read('window.api.getPreferences().then(value => value.automaticUpdates === true)'),
+      'automatic updates must re-enable'
+    )
+    await read('window.api.navigate("rei://settings/privacy")')
+    await waitFor(
+      () => read('!!document.querySelector("#clear-search-data")'),
+      'privacy must reopen'
+    )
+
     let confirmationCount = 0
     dialog.showMessageBox = async (_window, options) => {
       assert.equal(options.message, 'Clear search data?')
@@ -412,6 +441,7 @@ app.whenReady().then(async () => {
         'shortcuts',
         'keybinds',
         'downloads',
+        'updates',
         'privacy'
       ]) {
         await read(`document.querySelector('#settings-tab-${section}').click()`)
@@ -530,6 +560,7 @@ app.whenReady().then(async () => {
       'shortcuts',
       'keybinds',
       'downloads',
+      'updates',
       'privacy'
     ]) {
       await read(`document.querySelector('#settings-tab-${section}').click()`)
