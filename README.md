@@ -4,8 +4,8 @@ A minimal and opinionated Chromium browser built on Electron, Svelte, and TypeSc
 
 ## Download
 
-Download the Windows x64 installer (`rei-1.0.0-setup.exe`) or standalone portable
-executable (`rei-1.0.0-portable.exe`) from the [v1 release](https://github.com/mqt464/rei/releases/tag/v1).
+Download the Windows x64 installer (`rei-1.1.0-setup.exe`) or standalone portable
+executable (`rei-1.1.0-portable.exe`) from the [v1.1.0 release](https://github.com/mqt464/rei/releases/tag/v1.1.0).
 The builds are unsigned; Windows may display an unknown-publisher or SmartScreen warning.
 macOS and Linux binaries are not included in this release.
 
@@ -19,6 +19,27 @@ macOS and Linux binaries are not included in this release.
 - Optional tab sleeping and discarding to reduce background work and memory use.
 - Find in page, per-site permissions, and searchable browsing history.
 - Fullscreen media playback with Escape to return to the browser.
+
+### Split view
+
+Right-click a website tab and choose **Split view with current tab** to keep two
+pages side by side. Both tabs show a linked-pane badge with their left/right side;
+hover a badge to see its partner. Selecting either tab restores the pair, and
+clicking a page makes it the target for the address bar and keyboard shortcuts.
+
+Drag a pane's title to the other side to exchange positions; a quiet highlight
+previews the destination. Drag the 2px divider to resize, or double-click it to
+balance the panes. The divider has a wider invisible grab area. Focus a pane title
+and press **Alt+Left/Right** to move it with the keyboard; focus the divider and
+use **Left/Right** to resize (**Shift** for larger steps, **Enter** to balance).
+Press **Escape** to cancel a drag. **Separate tabs** exits split view without
+closing either page. Closing one pane keeps its partner open. Pairs are restored
+with startup sessions, including their widths; private and normal tabs cannot be paired together.
+Blank pages, internal browser pages, and failed navigations use the normal
+single-page layout. Motion follows Appearance settings and reduced-motion preferences.
+
+Run `npm run build && npm run check:split-view` to check tab menus, pairing,
+focus, pane dragging, resizing, fullscreen layout, session persistence, and privacy boundaries.
 
 ### Website scrollbars
 
@@ -52,14 +73,17 @@ Electron renders websites in sandboxed Chromium views, separate from the Svelte 
 Pages have Node.js disabled. Settings and browsing data stay in your local app profile.
 Searches use Google; online address-bar suggestions are opt-in.
 
-Privacy settings include "Do not sell or share my data" (Global Privacy Control) and
-"Send Do Not Track". Both are optional and apply to normal and incognito tabs.
+Privacy settings include automatic rejection of optional cookies on supported sites,
+tracking-link cleaning, third-party-cookie blocking, and "Do not sell or share my data"
+(Global Privacy Control). These are enabled for fresh profiles; saved choices are preserved.
+All apply to normal and incognito tabs. "Send Do Not Track" remains optional and off by default.
 GPC sends `Sec-GPC: 1` and exposes `navigator.globalPrivacyControl`; DNT sends
 `DNT: 1` and exposes `navigator.doNotTrack`. These signals request privacy choices;
 they do not block trackers or guarantee that websites comply. Tracker blocking is
 handled separately by the bundled uBlock Origin extension.
 
-Run `node scripts/check-privacy.cjs` after building to check privacy signals and persistence.
+Run `npm run check:privacy` after building to check protections, privacy signals, and persistence.
+See [privacy protections](resources/privacy-protections.md) for scope and compatibility limits.
 
 Type a URL, search, or slash command in the address bar. Open Settings from the sidebar or
 enter `rei://settings` to customize the browser.
@@ -78,6 +102,31 @@ Build output goes to `dist/`.
 
 After building, run `npm run check:fullscreen` to check fullscreen permissions,
 media sizing, browser UI restoration, and Escape handling in Electron.
+
+## Memory diagnostics
+
+After building, run `npm run check:memory` on Windows. The check uses a disposable
+profile with Rei's normal extensions. It opens and closes real Wikipedia, X, and
+YouTube tabs three times, with one website open at a time. YouTube's playback
+clock must advance; a loaded player shell is not counted as video playback.
+X is tested logged out, so this does not exercise an authenticated feed.
+Automatic tab sleeping and discarding are disabled only in the test profile,
+so they cannot hide retained tab memory.
+
+Add `-- --video-soak --trace-memory` to verify two additional minutes of playback
+per cycle and record process memory every 200 ms. These live-network checks take
+minutes, not seconds, and can fail when sites block access or media stalls.
+They never use your browsing profile or change your tab-sleep/discard settings.
+
+Results go to `.cache/memory/real-tabs.json`. Private bytes measure process-private
+allocation, not exclusively resident RAM. Summed working sets count shared pages
+multiple times. The closed-tab check rejects growth of 150 MiB or more between
+the first and last closed cycles and verifies website WebContents destruction.
+This coarse short-run budget cannot rule out smaller or long-running leaks.
+Normal samples precede a separately labeled diagnostic garbage collection.
+
+Run `node scripts/check-website-scrollbars.cjs` to also check that removed
+custom-colored scrollers do not retain detached DOM trees after their timers expire.
 
 ## Default browser
 

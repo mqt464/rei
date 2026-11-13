@@ -74,9 +74,10 @@ app.whenReady().then(async () => {
     const read = (script) => chrome.executeJavaScript(script)
     await waitFor(() => read('!!window.api'), 'UI must mount')
     const restarting = process.env.REI_PRIVACY_PHASE === 'restart'
-    assert.equal(initial.globalPrivacyControl, restarting)
+    assert.equal(initial.globalPrivacyControl, true)
     assert.equal(initial.doNotTrack, restarting)
     if (!restarting) {
+      await read('window.api.setPreferences({globalPrivacyControl:false})')
       assert.equal(
         await read(
           'window.api.setPreferences({globalPrivacyControl:"yes"}).then(()=>true,()=>false)'

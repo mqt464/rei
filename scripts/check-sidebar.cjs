@@ -56,8 +56,9 @@ app.whenReady().then(async () => {
     await chrome.loadFile(path.resolve(__dirname, '../out/renderer/index.html'))
     const read = (script) => chrome.executeJavaScript(script)
     await read(`window.api.navigate('http://127.0.0.1:${server.address().port}/')`)
-    await waitFor(() => window.contentView.children.length === 3, 'page must exist')
-    const page = window.contentView.children[1]
+    const isPage = (view) => view.webContents.getURL().startsWith('http://127.0.0.1:')
+    await waitFor(() => window.contentView.children.some(isPage), 'page must exist')
+    const page = window.contentView.children.find(isPage)
     await waitFor(
       () =>
         page.webContents.getURL().startsWith('http://127.0.0.1:') && !page.webContents.isLoading(),

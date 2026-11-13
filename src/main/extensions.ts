@@ -12,24 +12,31 @@ import {
   installExtensionCompatibility
 } from './extension-compatibility'
 import { ExtensionProxy } from './extension-proxy'
+import { cleanTrackingUrl } from '../shared/privacy'
 
 export const ublockId = 'fkgkibajhfbepljeaefdnfnegdcjomkh'
 export const uiPartition = 'persist:rei-ui'
 const extensionIdPattern = /^[a-p]{32}$/
 let doNotTrack = false
 let globalPrivacyControl = false
+let cleanTrackingLinks = true
 let privacyId = ''
 
-export function setExtensionDoNotTrack(enabled: boolean, globalPrivacy = false): void {
+function privacyScript(): string {
+  return `globalThis.reiDoNotTrack = ${doNotTrack}; globalThis.reiGlobalPrivacyControl = ${globalPrivacyControl}; globalThis.reiCleanTrackingLinks = ${cleanTrackingLinks}; globalThis.reiCleanTrackingUrl = ${cleanTrackingUrl.toString()}; void 0`
+}
+
+export async function setExtensionDoNotTrack(
+  enabled: boolean,
+  globalPrivacy = false,
+  cleanLinks = true
+): Promise<void> {
   doNotTrack = enabled
   globalPrivacyControl = globalPrivacy
+  cleanTrackingLinks = cleanLinks
   for (const contents of webContents.getAllWebContents()) {
     if (privacyId && contents.getURL().startsWith(`chrome-extension://${privacyId}/`))
-      void contents
-        .executeJavaScript(
-          `globalThis.reiDoNotTrack = ${enabled}; globalThis.reiGlobalPrivacyControl = ${globalPrivacy}`
-        )
-        .catch(console.error)
+      await contents.executeJavaScript(privacyScript()).catch(console.error)
   }
 }
 
@@ -177,11 +184,7 @@ export class ExtensionRuntime {
       if (contents.session !== this.session || contents.getType() !== 'backgroundPage') return
       contents.on('did-finish-load', () => {
         if (privacyId && contents.getURL().startsWith(`chrome-extension://${privacyId}/`))
-          void contents
-            .executeJavaScript(
-              `globalThis.reiDoNotTrack = ${doNotTrack}; globalThis.reiGlobalPrivacyControl = ${globalPrivacyControl}`
-            )
-            .catch(console.error)
+          void contents.executeJavaScript(privacyScript()).catch(console.error)
       })
     })
   }
@@ -297,7 +300,7 @@ export class ExtensionRuntime {
       join(this.bundledPath, 'rei-privacy')
     )
     privacyId = privacy.id
-    setExtensionDoNotTrack(doNotTrack, globalPrivacyControl)
+    await setExtensionDoNotTrack(doNotTrack, globalPrivacyControl, cleanTrackingLinks)
     await this.proxy.whenReady()
     this.starting = false
     this.save()
@@ -342,7 +345,6 @@ export class ExtensionRuntime {
           )
         if (
           background &&
-          !background.isLoading() &&
           (await background
             .executeJavaScript('globalThis.\u00b5Block?.readyToFilter === true')
             .catch(() => false))

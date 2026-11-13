@@ -21,7 +21,7 @@ if (!process.versions.electron) {
 
 const Module = require('node:module')
 const { createServer } = require('node:http')
-const { app, BaseWindow, Menu, nativeTheme } = require('electron')
+const { app, BaseWindow, Menu, nativeTheme, clipboard } = require('electron')
 app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion')
 app.commandLine.appendSwitch('disable-renderer-backgrounding')
 const bundlePath = path.resolve(__dirname, '../out/main/index.js')
@@ -490,6 +490,36 @@ app.whenReady().then(async () => {
       'window.api.setPreferences({defaultZoom:100,contextMenuStyle:"native"})'
     )
     item(await rightClick('#link', true), 'Copy link address')
+    const writeText = clipboard.writeText
+    let copiedLink
+    clipboard.writeText = (value) => {
+      copiedLink = value
+    }
+    try {
+      await contents.executeJavaScript(
+        'document.querySelector("#link").href="/target?utm_source=fixture&keep=yes#fragment"'
+      )
+      await chrome.executeJavaScript('window.api.setPreferences({cleanTrackingLinks:false})')
+      const nativeLink = await rightClick('#link', true)
+      item(nativeLink, 'Copy clean link').click()
+      assert.equal(copiedLink, `${url}/target?keep=yes#fragment`)
+      copiedLink = undefined
+      await chrome.executeJavaScript('window.api.setPreferences({contextMenuStyle:"rei"})')
+      const cleanLinkMenu = await rightClick('#link')
+      const cleanLinkItem = item(cleanLinkMenu, 'Copy clean link')
+      await readMenu(`window.api.selectContextMenu(${cleanLinkMenu.id}, ${cleanLinkItem.id})`)
+      await waitFor(
+        () => copiedLink,
+        'Copy clean link must work in Rei menus with automatic cleaning off'
+      )
+      assert.equal(copiedLink, `${url}/target?keep=yes#fragment`)
+    } finally {
+      clipboard.writeText = writeText
+      await contents.executeJavaScript('document.querySelector("#link").href="/target"')
+      await chrome.executeJavaScript(
+        'window.api.setPreferences({contextMenuStyle:"native",cleanTrackingLinks:true})'
+      )
+    }
     const nativeImageMenu = await rightClick('#image', true)
     item(nativeImageMenu, 'Copy image')
     item(nativeImageMenu, 'Save image as\u2026')
@@ -560,6 +590,17 @@ app.whenReady().then(async () => {
     )
     assert.equal(saved.contextMenuStyle, 'native', 'menu preference must persist')
     assert.equal(saved.contextMenuIcons, true)
+    const sidebarView = window.contentView.children[0]
+    const sidebarBounds = sidebarView.getBounds()
+    sidebarView.setBounds({ ...sidebarBounds, x: 20, y: 10 })
+    shown = undefined
+    await sidebar.executeJavaScript(
+      `window.api.showTabMenu(${JSON.stringify(originalTab)}, 24.6, 31.4)`
+    )
+    await waitFor(() => !!shown, 'native tab menu must open')
+    assert.equal(shown.options.x, 45, 'native menu must include source view horizontal offset')
+    assert.equal(shown.options.y, 41, 'native menu must include source view vertical offset')
+    sidebarView.setBounds(sidebarBounds)
     console.log(
       'PASS: mouse/keyboard colours, compact menus, fast entry/exit, image copy wiring/downloads, linked/broken images, native menus, theme/settings, secure actions, zoom/focus'
     )

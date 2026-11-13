@@ -1,6 +1,6 @@
 {
   "name": "rei",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "A minimal and opinionated Chromium browser built ontop of electron.",
   "main": "./out/main/index.js",
   "author": "mqt464",
@@ -10,6 +10,9 @@
     "url": "https://github.com/mqt464/rei.git"
   },
   "scripts": {
+    "check:privacy": "node scripts/check-cookie-protection.cjs && node scripts/check-privacy.cjs && node scripts/check-privacy-protections.cjs",
+    "check:split-view": "node scripts/check-split-view.cjs",
+    "check:memory": "node scripts/benchmark-memory.cjs .cache/memory/real-tabs.json --real-tabs --single-tab",
     "check:fullscreen": "node scripts/check-website-permissions.cjs && node scripts/check-fullscreen.cjs",
     "check:default-browser": "node scripts/check-default-browser.cjs",
     "prototype:commands": "node scripts/prototype-commands.cjs",
@@ -21,8 +24,8 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "svelte-check": "svelte-check --tsconfig ./tsconfig.web.json",
     "typecheck": "npm run typecheck:node && npm run svelte-check",
-    "start": "electron-vite preview",
-    "dev": "electron-vite dev",
+    "start": "node scripts/launch.cjs preview",
+    "dev": "node scripts/launch.cjs dev",
     "build": "npm run typecheck && electron-vite build",
     "postinstall": "install-electron && electron-builder install-app-deps",
     "build:unpack": "npm run build && electron-builder --dir",

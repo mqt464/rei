@@ -1,9 +1,11 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { Preferences } from '../shared/preferences'
+import { applyConsentRejection } from './consent'
 
-type PrivacySignals = Pick<Preferences, 'doNotTrack' | 'globalPrivacyControl'>
+type PrivacySignals = Pick<Preferences, 'doNotTrack' | 'globalPrivacyControl' | 'autoRejectConsent'>
 
 function applySignals(signals: PrivacySignals): void {
+  applyConsentRejection(signals.autoRejectConsent)
   contextBridge.executeInMainWorld({
     func: (value: PrivacySignals) => {
       Object.defineProperties(Navigator.prototype, {

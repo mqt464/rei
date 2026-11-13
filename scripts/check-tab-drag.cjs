@@ -57,14 +57,15 @@ const tabList = {
 const targetAt = new Function(
   'tabList',
   ts.transpile(
-    'let draggedTabId = "first"; let dropTargetTabId = null; let dropIndicatorY = 0;' +
+    'let dropTargetTabId = null; let dropIndicatorY = 0;' +
       targetingSource +
-      '; return (clientY) => { updateDropTarget({ clientY, preventDefault() {} }); return { target: dropTargetTabId, y: dropIndicatorY }; }',
+      '; return (clientY, types = ["application/x-rei-tab"]) => { dropTargetTabId = null; updateDropTarget({ clientY, dataTransfer: { types }, preventDefault() {} }); return { target: dropTargetTabId, y: dropIndicatorY }; }',
     { target: ts.ScriptTarget.ES2022 }
   )
 )(tabList)
 assert.deepEqual(targetAt(110), { target: 'first', y: 0 })
 assert.deepEqual(targetAt(145), { target: 'middle', y: 31 })
+assert.deepEqual(targetAt(145, ['text/plain']), { target: null, y: 31 })
 assert.deepEqual(targetAt(175), { target: 'last', y: 62 })
 assert.deepEqual(targetAt(300), { target: '', y: 92 })
 assert.deepEqual(targetAt(1000), { target: '', y: 92 })
@@ -127,6 +128,8 @@ setTabDragImage(
 )
 assert.deepEqual(dragImage, [preview, 35, 12])
 assert.equal(preview.style.width, '200px')
+assert.equal(preview.style.left, '10px')
+assert.equal(preview.style.top, '100px')
 assert.equal(previewClasses.has('dragging'), false)
 assert.equal(previewClasses.has('tab-drag-preview'), true)
 assert.equal(previewAttributes.get('aria-hidden'), 'true')
@@ -134,6 +137,35 @@ assert.equal(appended, preview)
 cleanup()
 assert.equal(appended, null)
 assert.match(sidebar, /setTabDragImage\(event, event.currentTarget\)/)
+assert.doesNotMatch(styles, /top: -10000px/)
+assert.match(styles, /user-select: none/)
+assert.match(sidebar, /setData\('application\/x-rei-tab', token\)/)
+assert.match(sidebar, /window.api.dropTab\(token, dropTargetTabId\)/)
+const finishSource = sidebar.slice(
+  sidebar.indexOf('  function finishDrag('),
+  sidebar.indexOf('  onMount(')
+)
+const detached = []
+const finishDrag = new Function(
+  'window',
+  ts.transpile(
+    'let draggedTabId = ""; let dropTargetTabId = null;' +
+      sidebar.slice(
+        sidebar.indexOf('  function resetDrag('),
+        sidebar.indexOf('  function finishDrag(')
+      ) +
+      finishSource +
+      '; return (id, dropEffect, screenX = 900, screenY = 300) => { draggedTabId = id; finishDrag({ dataTransfer: { dropEffect }, screenX, screenY }); return draggedTabId; }',
+    { target: ts.ScriptTarget.ES2022 }
+  )
+)({ api: { detachTab: (id) => detached.push(id) } })
+assert.equal(finishDrag('first', 'none'), '')
+assert.deepEqual(detached, ['first'])
+finishDrag('middle', 'move')
+finishDrag('middle', 'copy')
+finishDrag('middle', 'none', 0, 0)
+finishDrag('', 'none')
+assert.deepEqual(detached, ['first'])
 console.log(
-  'Tab drag checks passed: insertion targets, bottom drops, invalid IDs, hover motion, and full-row drag preview.'
+  'Tab drag checks passed: reorder targets, full-row preview, tear-off requests, accepted drops, and cancelled drags.'
 )

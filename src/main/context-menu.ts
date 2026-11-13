@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import buildChromeContextMenu from 'electron-chrome-context-menu'
 import type { ContextMenuState } from '../shared/context-menu'
 import { currentPreferences, registerPreferences } from './preferences'
+import { cleanTrackingUrl } from '../shared/privacy'
 import { registerTheme } from './theme'
 import { uiPartition } from './extensions'
 import type { ExtensionRuntime } from './extensions'
@@ -113,6 +114,17 @@ export class BrowserContextMenu {
   async show(source: WebContents, params: ContextMenuParams, incognito = false): Promise<void> {
     this.dismiss(false)
     const menu = buildChromeContextMenu({ params, webContents: source, openLink: this.openLink })
+    if (/^https?:/i.test(params.linkURL)) {
+      const cleaned = cleanTrackingUrl(params.linkURL)
+      if (cleaned !== params.linkURL)
+        menu.insert(
+          0,
+          new MenuItem({
+            label: 'Copy clean link',
+            click: () => clipboard.writeText(cleaned)
+          })
+        )
+    }
     if (params.mediaType === 'image') {
       const imageItems = [
         new MenuItem({
@@ -155,15 +167,24 @@ export class BrowserContextMenu {
       menu.popup({ window: this.window })
       return
     }
+    await this.showMenu(source, menu, params.x, params.y)
+  }
+
+  async showMenu(source: WebContents, menu: Menu, x: number, y: number): Promise<void> {
+    this.dismiss(false)
     const sourceView = this.window.contentView.children.find(
       (view) => view instanceof WebContentsView && view.webContents === source
     )
     if (!sourceView) return
     const bounds = sourceView.getBounds()
+    if (currentPreferences().contextMenuStyle === 'native') {
+      menu.popup({ window: this.window, x: Math.round(bounds.x + x), y: Math.round(bounds.y + y) })
+      return
+    }
     const state: ContextMenuState = {
       id: ++this.sequence,
-      x: bounds.x + params.x,
-      y: bounds.y + params.y,
+      x: bounds.x + x,
+      y: bounds.y + y,
       items: menu.items.flatMap((item, index) =>
         item.visible
           ? [

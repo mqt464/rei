@@ -6,6 +6,7 @@ import { defaultPreferences, parsePreferences } from '../shared/preferences'
 import type { Preferences } from '../shared/preferences'
 import { setExtensionDoNotTrack } from './extensions'
 import { clearDownloadHistory, trackDownload } from './downloads'
+import { cleanTrackingUrl } from '../shared/privacy'
 
 let preferences: Preferences | undefined
 const clients = new Map<WebContents, (value: Preferences) => void>()
@@ -36,7 +37,15 @@ export function currentPreferences(): Preferences {
   return preferences
 }
 
-function save(patch: unknown): Preferences {
+let saving: Promise<unknown> = Promise.resolve()
+
+function save(patch: unknown): Promise<Preferences> {
+  const pending = saving.catch(() => {}).then(() => persist(patch))
+  saving = pending
+  return pending
+}
+
+async function persist(patch: unknown): Promise<Preferences> {
   const next = parsePreferences(patch, currentPreferences())
   if (
     next.downloadDirectory &&
@@ -57,7 +66,7 @@ function save(patch: unknown): Preferences {
   }
   preferences = next
   if (!next.downloadHistory) clearDownloadHistory()
-  setExtensionDoNotTrack(next.doNotTrack, next.globalPrivacyControl)
+  await setExtensionDoNotTrack(next.doNotTrack, next.globalPrivacyControl, next.cleanTrackingLinks)
   for (const session of sessions) {
     session.setSpellCheckerEnabled(next.spellcheck)
     session.setDownloadPath(next.downloadDirectory || app.getPath('downloads'))
@@ -74,6 +83,15 @@ export function registerSessionPreferences(session: Session, incognito = false):
   if (!sessions.has(session)) {
     sessions.add(session)
     if (incognito) {
+      session.webRequest.onBeforeRequest((details, callback) => {
+        const cleaned =
+          currentPreferences().cleanTrackingLinks &&
+          details.method === 'GET' &&
+          ['mainFrame', 'subFrame'].includes(details.resourceType)
+            ? cleanTrackingUrl(details.url)
+            : details.url
+        callback(cleaned === details.url ? {} : { redirectURL: cleaned })
+      })
       session.webRequest.onBeforeSendHeaders((details, callback) => {
         const { doNotTrack, globalPrivacyControl } = currentPreferences()
         const headers = { ...details.requestHeaders }

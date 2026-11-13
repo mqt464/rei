@@ -3,6 +3,7 @@ import {
   clipboard,
   dialog,
   ipcMain,
+  Menu,
   nativeTheme,
   screen,
   session,
@@ -12,10 +13,12 @@ import {
 } from 'electron'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import type { EventEmitter } from 'node:events'
 import { BrowserContextMenu } from './context-menu'
 import { PageFinder } from './find-in-page'
 import type { BaseWindow, IpcMainEvent, IpcMainInvokeEvent, WebContents } from 'electron'
 import type { BrowserState, BrowserTab } from '../shared/browser'
+import { splitGeometry, splitDividerWidth, splitDividerHitWidth } from '../shared/split'
 import {
   downloadsUrl,
   historyUrl,
@@ -71,37 +74,69 @@ interface TabEntry {
   transition?: Promise<void>
   waking?: Promise<void>
   navigationVersion?: number
+  unbind?: () => void
+  incognitoPartition?: string
+}
+
+export interface DetachedTab {
+  tab: TabEntry
+  x: number
+  y: number
+}
+
+let nextTab = 0
+const privatePartitions = new Map<number, () => Set<string>>()
+const tabWindows = new Map<
+  number,
+  (id: string, receive: (tab: TabEntry) => void) => Promise<void>
+>()
+let tabDrag: { token: string; windowId: number; id: string } | undefined
+
+function createUIView(additionalArguments: string[] = []): WebContentsView {
+  return new WebContentsView({
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      additionalArguments,
+      partition: uiPartition,
+      contextIsolation: true,
+      sandbox: false,
+      nodeIntegration: false
+    }
+  })
 }
 
 export function attachBrowser(
   window: BaseWindow,
   store: SearchStore,
-  extensions?: ExtensionRuntime
+  extensions?: ExtensionRuntime,
+  openWindow?: (detached: DetachedTab) => void,
+  detached?: DetachedTab
 ): WebContents {
   const windowId = window.id
-  const chrome = new WebContentsView({
-    webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
-      additionalArguments: app.isPackaged ? ['--rei-disable-reload'] : [],
-      partition: uiPartition,
-      contextIsolation: true,
-      sandbox: false,
-      nodeIntegration: false
-    }
-  })
-  const sidebar = new WebContentsView({
-    webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
-      partition: uiPartition,
-      contextIsolation: true,
-      sandbox: false,
-      nodeIntegration: false
-    }
-  })
+  const chrome = createUIView(app.isPackaged ? ['--rei-disable-reload'] : [])
+  const sidebar = createUIView()
   const tabs = new Map<string, TabEntry>()
+  const splitBar = createUIView()
+  splitBar.setVisible(false)
+  const splitDivider = createUIView()
+  splitDivider.setVisible(false)
+  const uiContents = [chrome, sidebar, splitBar, splitDivider].map((view) => view.webContents)
+  let splitGesture: { kind: 'move' | 'resize'; tabId: string; initialRatio: number } | undefined
+  let layoutAnimation: ReturnType<typeof setInterval> | undefined
+  let layoutProgress = 1
+  const layoutFrom = new Map<string, Electron.Rectangle>()
   const closedTabs: { url: string; index: number }[] = []
   const snapshots = new TabSnapshotStore()
-  let incognitoPartition: string | undefined
+  let incognitoPartition = detached?.tab.incognitoPartition
+  privatePartitions.set(
+    windowId,
+    () =>
+      new Set(
+        [...tabs.values()].flatMap((tab) =>
+          tab.incognitoPartition ? [tab.incognitoPartition] : []
+        )
+      )
+  )
   const search = new SearchService(store)
   const contextMenu = new BrowserContextMenu(
     window,
@@ -121,7 +156,6 @@ export function attachBrowser(
   )
   let activeTabId = ''
   const finder = new PageFinder(window, chrome.webContents, keyboard)
-  let nextTab = 0
   let overlayHeight = 38
   let pointerNearTopbar = false
   let sidebarVisible = true
@@ -134,36 +168,226 @@ export function attachBrowser(
   let registeringExtensionTab = false
   const appearanceVersions = new WeakMap<WebContents, number>()
   const sleepChecks = new Set<string>()
+  const detachingTabs = new Set<string>()
   let websiteAppearance = ''
   let fullscreenTabId: string | undefined
   window.setContentView(new View())
   window.contentView.addChildView(sidebar)
   window.contentView.addChildView(chrome)
+  window.contentView.addChildView(splitBar)
+  window.contentView.addChildView(splitDivider)
+
+  function activeSplit(): BrowserState['split'] {
+    const tab = tabs.get(activeTabId)?.state
+    if (!tab?.split) return
+    const extra = {
+      ratio: tab.split.ratio ?? 0.5,
+      width: Math.max(0, window.getContentBounds().width - sidebarWidth),
+      gesture: splitGesture?.kind
+    }
+    return tab.split.side === 'left'
+      ? { leftId: tab.id, rightId: tab.split.partnerId, ...extra }
+      : { leftId: tab.split.partnerId, rightId: tab.id, ...extra }
+  }
+
+  function visibleTab(id: string): boolean {
+    const split = activeSplit()
+    return id === activeTabId || id === split?.leftId || id === split?.rightId
+  }
+
+  function clearSplit(id: string): void {
+    const tab = tabs.get(id)?.state
+    if (!tab?.split) return
+    if (splitGesture && visibleTab(id)) finishSplitGesture(true)
+    const partner = tabs.get(tab.split.partnerId)?.state
+    delete tab.split
+    if (partner) delete partner.split
+  }
+
+  function canSplit(id: string): boolean {
+    const tab = tabs.get(id)?.state
+    return !!tab && /^https?:/.test(tab.url) && !tab.error
+  }
+
+  function animateLayout(change: () => void): void {
+    clearInterval(layoutAnimation)
+    layoutFrom.clear()
+    for (const [id, tab] of tabs)
+      if (tab.view && visibleTab(id)) layoutFrom.set(id, tab.view.getBounds())
+    change()
+    const theme = currentTheme()
+    const duration =
+      theme.motion === 'system' && !systemPreferences.getAnimationSettings().prefersReducedMotion
+        ? 22000 / theme.animationSpeed
+        : 0
+    layoutProgress = duration ? 0 : 1
+    publish()
+    if (!duration) return
+    const started = Date.now()
+    layoutAnimation = setInterval(() => {
+      const progress = Math.min(1, (Date.now() - started) / duration)
+      layoutProgress = 1 - (1 - progress) ** 3
+      resize()
+      if (progress === 1) {
+        clearInterval(layoutAnimation)
+        layoutAnimation = undefined
+        layoutFrom.clear()
+      }
+    }, 8)
+  }
+
+  function splitTab(id: string): void {
+    if (id === activeTabId || !canSplit(id) || !canSplit(activeTabId)) return
+    if (!!tabs.get(id)!.state.incognito !== !!tabs.get(activeTabId)!.state.incognito) return
+    if (tabs.get(activeTabId)!.state.split?.partnerId === id) return
+    animateLayout(() => {
+      clearSplit(activeTabId)
+      clearSplit(id)
+      tabs.get(activeTabId)!.state.split = { partnerId: id, side: 'left' }
+      tabs.get(id)!.state.split = { partnerId: activeTabId, side: 'right' }
+      tabs.get(id)!.lastActive = Date.now()
+      void wakeTab(tabs.get(id)!)
+    })
+  }
+
+  function swapSplit(id: string): void {
+    const tab = tabs.get(id)?.state
+    const partner = tab?.split && tabs.get(tab.split.partnerId)?.state
+    if (!tab?.split || !partner?.split) return
+    animateLayout(() => {
+      tab.split!.side = tab.split!.side === 'left' ? 'right' : 'left'
+      partner.split!.side = tab.split!.side === 'left' ? 'right' : 'left'
+    })
+  }
+
+  function setSplitRatio(id: string, ratio: number): void {
+    const tab = tabs.get(id)?.state
+    const partner = tab?.split && tabs.get(tab.split.partnerId)?.state
+    if (!tab?.split || !partner?.split) return
+    const width = window.getContentBounds().width - sidebarWidth
+    const next = splitGeometry(width, ratio).ratio
+    tab.split.ratio = next
+    partner.split.ratio = next
+  }
+
+  function finishSplitGesture(cancelled = false): void {
+    if (!splitGesture) return
+    const gesture = splitGesture
+    splitGesture = undefined
+    if (cancelled && gesture.kind === 'resize') setSplitRatio(gesture.tabId, gesture.initialRatio)
+    publish()
+  }
+
+  function splitAction(event: IpcMainEvent, action: unknown, id: unknown, value: unknown): void {
+    if (!isTrusted(event)) return
+    const header = event.sender === splitBar.webContents
+    const divider = event.sender === splitDivider.webContents
+    if (!header && !divider) return
+    if (action === 'finish') {
+      if ((header && splitGesture?.kind === 'move') || (divider && splitGesture?.kind === 'resize'))
+        finishSplitGesture(value === true)
+      return
+    }
+    if (typeof id !== 'string' || !visibleTab(id) || !tabs.get(id)?.state.split || fullscreenTabId)
+      return
+    if (action === 'begin' && ((header && value === 'move') || (divider && value === 'resize'))) {
+      finishSplitGesture(true)
+      clearInterval(layoutAnimation)
+      layoutAnimation = undefined
+      layoutProgress = 1
+      layoutFrom.clear()
+      splitGesture = { kind: value, tabId: id, initialRatio: activeSplit()!.ratio }
+      publish()
+    } else if (action === 'move' && header && (value === 'left' || value === 'right')) {
+      splitGesture = undefined
+      if (tabs.get(id)!.state.split!.side !== value) swapSplit(id)
+      else publish()
+    } else if (
+      action === 'resize' &&
+      divider &&
+      typeof value === 'number' &&
+      Number.isFinite(value)
+    ) {
+      setSplitRatio(id, value)
+      publish()
+    }
+  }
 
   function resize(animateSidebar = false): void {
     const { width, height } = window.getContentBounds()
     if (fullscreenTabId) {
       sidebar.setVisible(false)
       chrome.setVisible(false)
+      splitBar.setVisible(false)
+      splitDivider.setVisible(false)
+      for (const [id, tab] of tabs) tab.view?.setVisible(id === fullscreenTabId)
       tabs.get(fullscreenTabId)?.view?.setBounds({ x: 0, y: 0, width, height })
       return
     }
     chrome.setVisible(true)
+    for (const [id, tab] of tabs)
+      tab.view?.setVisible(
+        visibleTab(id) && !!tab.state.url && !isInternalUrl(tab.state.url) && !tab.state.error
+      )
     if (!sidebarAnimation)
       sidebarWidth = sidebarVisible || pointerNearSidebar ? desiredSidebarWidth() : 0
     const sideWidth = sidebarWidth
     sidebar.setVisible(sideWidth > 0)
     sidebar.setBounds({ x: 0, y: 0, width: sideWidth, height })
-    const resizedTabs = animateSidebar
-      ? [tabs.get(activeTabId)].filter((tab) => tab !== undefined)
-      : tabs.values()
-    for (const tab of resizedTabs)
-      tab.view?.setBounds({
+    const split = activeSplit()
+    const contentWidth = Math.max(0, width - sideWidth)
+    const paneTop = overlayHeight + (split ? 36 : 0)
+    const { leftWidth, rightWidth } = splitGeometry(contentWidth, split?.ratio)
+    splitBar.setVisible(!!split)
+    splitDivider.setVisible(!!split && splitGesture?.kind !== 'move')
+    if (split) {
+      splitBar.setBounds({
         x: sideWidth,
         y: overlayHeight,
-        width: Math.max(0, width - sideWidth),
-        height: Math.max(0, height - overlayHeight)
+        width: contentWidth,
+        height: splitGesture?.kind === 'move' ? Math.max(36, height - overlayHeight) : 36
       })
+      const resizing = splitGesture?.kind === 'resize'
+      splitDivider.setBounds({
+        x: resizing
+          ? sideWidth
+          : sideWidth + leftWidth - (splitDividerHitWidth - splitDividerWidth) / 2,
+        y: paneTop,
+        width: resizing ? contentWidth : splitDividerHitWidth,
+        height: Math.max(0, height - paneTop)
+      })
+    }
+    const resizedTabs = animateSidebar
+      ? [...tabs.values()].filter((tab) => visibleTab(tab.state.id))
+      : tabs.values()
+    for (const tab of resizedTabs) {
+      if (!tab.view) continue
+      const right = split?.rightId === tab.state.id
+      const paired = !!split && visibleTab(tab.state.id)
+      const target = {
+        x: Math.round(sideWidth + (paired && right ? leftWidth + splitDividerWidth : 0)),
+        y: paired ? paneTop : overlayHeight,
+        width: paired ? (right ? rightWidth : leftWidth) : contentWidth,
+        height: Math.max(0, height - (paired ? paneTop : overlayHeight))
+      }
+      const from = layoutFrom.get(tab.state.id) ?? { ...target, x: width, width: 0 }
+      tab.view.setBounds(
+        layoutProgress === 1 || !visibleTab(tab.state.id)
+          ? target
+          : {
+              x: Math.round(from.x + (target.x - from.x) * layoutProgress),
+              y: Math.round(from.y + (target.y - from.y) * layoutProgress),
+              width: Math.max(
+                0,
+                Math.round(from.width + (target.width - from.width) * layoutProgress)
+              ),
+              height: Math.max(
+                0,
+                Math.round(from.height + (target.height - from.height) * layoutProgress)
+              )
+            }
+      )
+    }
     const active = tabs.get(activeTabId)?.state
     chrome.setBounds({
       x: sideWidth,
@@ -174,15 +398,18 @@ export function attachBrowser(
           ? Math.min(height, overlayHeight)
           : height
     })
-    finder.resize(sideWidth, overlayHeight)
+    const focusedBounds = split ? tabs.get(activeTabId)?.view?.getBounds() : undefined
+    finder.resize(
+      focusedBounds?.x ?? sideWidth,
+      focusedBounds?.y ?? overlayHeight,
+      focusedBounds ? focusedBounds.x + focusedBounds.width : width
+    )
   }
 
   function publish(): void {
     if (window.isDestroyed()) return
     for (const [id, tab] of tabs)
-      tab.view?.setVisible(
-        id === activeTabId && !!tab.state.url && !isInternalUrl(tab.state.url) && !tab.state.error
-      )
+      if (tab.state.split && (!canSplit(id) || !canSplit(tab.state.split.partnerId))) clearSplit(id)
     resize()
     const active = tabs.get(activeTabId)?.state
     finder.sync(`${activeTabId}:${active?.url ?? ''}`)
@@ -193,10 +420,14 @@ export function attachBrowser(
       activeTabId,
       activeWebContentsId: tabs.get(activeTabId)?.view?.webContents.id,
       controlHeld,
+      split: activeSplit(),
       tabs: [...tabs.values()].map((tab) => ({ ...tab.state }))
     }
     chrome.webContents.send('browser:state', state)
     if (!sidebar.webContents.isDestroyed()) sidebar.webContents.send('browser:state', state)
+    if (!splitBar.webContents.isDestroyed()) splitBar.webContents.send('browser:state', state)
+    if (!splitDivider.webContents.isDestroyed())
+      splitDivider.webContents.send('browser:state', state)
     if (!initializing) saveSession(windowId, state.tabs, activeTabId)
   }
 
@@ -297,13 +528,24 @@ export function attachBrowser(
   }
 
   function switchTab(id: string, focusPage = true): void {
+    if (splitGesture) finishSplitGesture(true)
     if (!tabs.has(id)) return
     contextMenu.dismiss(false)
-    const previous = tabs.get(activeTabId)
     if (activeTabId !== id) suggestionRequest?.abort()
-    if (previous) previous.lastActive = Date.now()
+    for (const tab of tabs.values()) if (visibleTab(tab.state.id)) tab.lastActive = Date.now()
+    if (!visibleTab(id)) {
+      clearInterval(layoutAnimation)
+      layoutAnimation = undefined
+      layoutProgress = 1
+      layoutFrom.clear()
+    }
     activeTabId = id
     const selected = tabs.get(id)!
+    const partnerId = selected.state.split?.partnerId
+    if (partnerId && tabs.has(partnerId)) {
+      tabs.get(partnerId)!.lastActive = Date.now()
+      void wakeTab(tabs.get(partnerId)!)
+    }
     selected.lastActive = Date.now()
     void wakeTab(selected).then(() => {
       if (selected.view && activeTabId === id && !selected.state.incognito)
@@ -428,11 +670,8 @@ export function attachBrowser(
           page.navigationHistory.goForward()
         else if (action === 'reload') page.reload()
         else if (action === 'hardReload') page.reloadIgnoringCache()
-        else if (action === 'mute') {
-          tab.state.muted = !tab.state.muted
-          page.setAudioMuted(tab.state.muted)
-          publish()
-        } else if (['zoomIn', 'zoomOut', 'resetZoom'].includes(action)) {
+        else if (action === 'mute') toggleMute(tab.state.id)
+        else if (['zoomIn', 'zoomOut', 'resetZoom'].includes(action)) {
           tab.zoom =
             action === 'resetZoom'
               ? currentPreferences().defaultZoom / 100
@@ -524,45 +763,40 @@ export function attachBrowser(
 
   function createTabView(entry: TabEntry): void {
     const tab = entry.state
-    if (tab.incognito) incognitoPartition ??= `rei-incognito-${randomUUID()}`
-    const view = new WebContentsView({
-      webPreferences: {
-        preload: join(__dirname, '../preload/keyboard.js'),
-        additionalArguments: ['--rei-browsing'],
-        partition: tab.incognito ? incognitoPartition : undefined,
-        nodeIntegration: false,
-        nodeIntegrationInSubFrames: true,
-        contextIsolation: true,
-        sandbox: true
-      }
-    })
+    if (tab.incognito)
+      entry.incognitoPartition ??= incognitoPartition ??= `rei-incognito-${randomUUID()}`
+    const existingView = entry.view
+    const view =
+      existingView ??
+      new WebContentsView({
+        webPreferences: {
+          preload: join(__dirname, '../preload/keyboard.js'),
+          additionalArguments: ['--rei-browsing'],
+          partition: tab.incognito ? entry.incognitoPartition : undefined,
+          nodeIntegration: false,
+          nodeIntegrationInSubFrames: true,
+          contextIsolation: true,
+          sandbox: true
+        }
+      })
     entry.view = view
-    registerPlayingMedia(view.webContents)
-    entry.appearanceCss = undefined
+    if (!existingView) {
+      registerPlayingMedia(view.webContents)
+      entry.appearanceCss = undefined
+    }
     view.setBackgroundColor(themeColors(currentTheme(), nativeTheme.shouldUseDarkColors).background)
     window.contentView.addChildView(view)
     window.contentView.addChildView(chrome)
+    window.contentView.addChildView(splitBar)
+    window.contentView.addChildView(splitDivider)
     view.setVisible(false)
     const contents = view.webContents
-    const leaveFullscreen = (): void => {
-      if (fullscreenTabId !== tab.id) return
-      fullscreenTabId = undefined
-      if (!window.isDestroyed()) resize()
-    }
-    contents.on('enter-html-full-screen', () => {
-      fullscreenTabId = tab.id
-      finder.close()
-      resize()
-    })
-    contents.on('leave-html-full-screen', leaveFullscreen)
-    contents.on('destroyed', leaveFullscreen)
-    contents.on('render-process-gone', leaveFullscreen)
-    contents.ipc.on('privacy:get', (event) => {
-      const { doNotTrack, globalPrivacyControl } = currentPreferences()
-      event.returnValue = { doNotTrack, globalPrivacyControl }
-    })
     registerWebsitePermissions(contents, window, !!tab.incognito)
     registerSessionPreferences(contents.session, !!tab.incognito)
+    const listenersBefore = [contents, contents.ipc].map((emitter: EventEmitter) => ({
+      emitter,
+      listeners: new Set(emitter.eventNames().flatMap((name) => emitter.listeners(name)))
+    }))
     if (extensions && !tab.incognito) {
       registeringExtensionTab = true
       try {
@@ -574,6 +808,24 @@ export function attachBrowser(
         registeringExtensionTab = false
       }
     }
+    const leaveFullscreen = (): void => {
+      if (fullscreenTabId !== tab.id) return
+      fullscreenTabId = undefined
+      if (!window.isDestroyed()) resize()
+    }
+    contents.on('enter-html-full-screen', () => {
+      finishSplitGesture(true)
+      fullscreenTabId = tab.id
+      finder.close()
+      resize()
+    })
+    contents.on('leave-html-full-screen', leaveFullscreen)
+    contents.on('destroyed', leaveFullscreen)
+    contents.on('render-process-gone', leaveFullscreen)
+    contents.ipc.on('privacy:get', (event) => {
+      const { doNotTrack, globalPrivacyControl, autoRejectConsent } = currentPreferences()
+      event.returnValue = { doNotTrack, globalPrivacyControl, autoRejectConsent }
+    })
     contents.on('context-menu', (_event, params) => {
       void contextMenu.show(contents, params, !!tab.incognito)
     })
@@ -605,6 +857,7 @@ export function attachBrowser(
     })
     contents.on('focus', () => {
       if (!window.isDestroyed()) {
+        if (visibleTab(tab.id) && activeTabId !== tab.id) switchTab(tab.id, false)
         chrome.webContents.send('browser:page-focus')
         if (!sidebar.webContents.isDestroyed()) sidebar.webContents.send('browser:page-focus')
       }
@@ -692,6 +945,18 @@ export function attachBrowser(
         )
       return { action: 'deny' }
     })
+    const bindings = listenersBefore.flatMap(({ emitter, listeners }) =>
+      emitter.eventNames().flatMap((name) =>
+        emitter
+          .listeners(name)
+          .filter((listener) => !listeners.has(listener))
+          .map((listener) => ({ emitter, name, listener }))
+      )
+    )
+    entry.unbind = () => {
+      for (const { emitter, name, listener } of bindings)
+        emitter.removeListener(name, listener as (...args: unknown[]) => void)
+    }
   }
 
   function wakeTab(tab: TabEntry, restore = true): Promise<void> {
@@ -756,6 +1021,8 @@ export function attachBrowser(
     if (!tab) return
     const ids = [...tabs.keys()]
     const index = ids.indexOf(id)
+    const partnerId = tab.state.split?.partnerId
+    clearSplit(id)
     if (!tab.state.incognito) closedTabs.push({ url: tab.state.url, index })
     if (closedTabs.length > 25) closedTabs.shift()
     tabs.delete(id)
@@ -764,11 +1031,18 @@ export function attachBrowser(
       if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close()
     }
     snapshots.remove(id)
-    if (tab.state.incognito && ![...tabs.values()].some((entry) => entry.state.incognito))
-      clearIncognitoSession()
+    if (tab.state.incognito) clearIncognitoSession(tab.incognitoPartition)
     if (!tabs.size) newTab()
-    else if (activeTabId === id) switchTab(ids[index + 1] ?? ids[index - 1])
+    else if (activeTabId === id) switchTab(partnerId ?? ids[index + 1] ?? ids[index - 1])
     else publish()
+  }
+
+  function toggleMute(id: string): void {
+    const tab = tabs.get(id)
+    if (!tab) return
+    tab.state.muted = !tab.state.muted
+    tab.view?.webContents.setAudioMuted(tab.state.muted)
+    publish()
   }
 
   function reorderTab(id: string, targetId: string): void {
@@ -784,11 +1058,16 @@ export function attachBrowser(
     publish()
   }
 
-  function clearIncognitoSession(): void {
-    if (!incognitoPartition) return
-    const privateSession = session.fromPartition(incognitoPartition)
+  function clearIncognitoSession(partition = incognitoPartition): void {
+    if (!partition) return
+    if (
+      partition === incognitoPartition &&
+      ![...tabs.values()].some((tab) => tab.incognitoPartition === partition)
+    )
+      incognitoPartition = undefined
+    if ([...privatePartitions.values()].some((current) => current().has(partition))) return
+    const privateSession = session.fromPartition(partition)
     clearPrivateWebsitePermissions(privateSession)
-    incognitoPartition = undefined
     void Promise.all([
       privateSession.clearStorageData(),
       privateSession.clearCache(),
@@ -797,13 +1076,132 @@ export function attachBrowser(
   }
 
   function isTrusted(event: IpcMainEvent | IpcMainInvokeEvent): boolean {
-    return [chrome.webContents, sidebar.webContents].some(
+    return uiContents.some(
       (contents) =>
         !contents.isDestroyed() &&
         event.sender === contents &&
         event.senderFrame === contents.mainFrame
     )
   }
+
+  function detachTab(id: string): void {
+    if (!openWindow) return
+    const cursor = screen.getCursorScreenPoint()
+    const bounds = window.getBounds()
+    if (
+      cursor.x >= bounds.x &&
+      cursor.x < bounds.x + bounds.width &&
+      cursor.y >= bounds.y &&
+      cursor.y < bounds.y + bounds.height
+    )
+      return
+    void transferTab(id, (tab) =>
+      openWindow({
+        tab,
+        x: cursor.x - Math.min(100, sidebarWidth / 2),
+        y: cursor.y - 50
+      })
+    )
+  }
+
+  async function transferTab(id: string, receive: (tab: TabEntry) => void): Promise<void> {
+    const tab = tabs.get(id)
+    if (!tab || detachingTabs.has(id)) return
+    detachingTabs.add(id)
+    try {
+      await tab.waking
+      await tab.transition
+      if (tab.state.sleeping || tab.state.discarded) await wakeTab(tab)
+      if (window.isDestroyed() || tabs.get(id) !== tab || tab.state.sleeping || tab.state.discarded)
+        return
+      const ids = [...tabs.keys()]
+      const index = ids.indexOf(id)
+      const previousActiveId = activeTabId
+      finder.close()
+      contextMenu.dismiss(false)
+      clearSplit(id)
+      if (fullscreenTabId === id) {
+        fullscreenTabId = undefined
+        window.setFullScreen(false)
+      }
+      tab.unbind?.()
+      if (tab.view) window.contentView.removeChildView(tab.view)
+      tabs.delete(id)
+      try {
+        if (extensions && tab.view && !tab.state.incognito)
+          extensions.api.removeTab(tab.view.webContents)
+        receive(tab)
+      } catch (error) {
+        tabs.set(id, tab)
+        createTabView(tab)
+        reorderTab(id, ids[index + 1] ?? '')
+        switchTab(previousActiveId)
+        throw error
+      }
+      snapshots.remove(id)
+      if (!tabs.size) window.close()
+      else {
+        if (activeTabId === id) switchTab(ids[index + 1] ?? ids[index - 1])
+        else publish()
+        if (tab.state.incognito) clearIncognitoSession(tab.incognitoPartition)
+      }
+    } catch (error) {
+      console.error('Could not transfer tab:', error)
+    } finally {
+      detachingTabs.delete(id)
+    }
+  }
+
+  function receiveTab(tab: TabEntry, targetId: string): void {
+    if (window.isDestroyed() || (targetId !== '' && !tabs.has(targetId)))
+      throw new Error('The destination tab list changed during transfer.')
+    tabs.set(tab.state.id, tab)
+    try {
+      createTabView(tab)
+      reorderTab(tab.state.id, targetId)
+      window.show()
+      window.focus()
+      switchTab(tab.state.id)
+    } catch (error) {
+      tab.unbind?.()
+      if (tab.view) window.contentView.removeChildView(tab.view)
+      tabs.delete(tab.state.id)
+      publish()
+      throw error
+    }
+  }
+
+  for (const contents of uiContents)
+    contents.ipc.on('browser:tab-drag', (event, id: unknown) => {
+      if (
+        !isTrusted(event) ||
+        event.sender !== sidebar.webContents ||
+        typeof id !== 'string' ||
+        !tabs.has(id)
+      ) {
+        event.returnValue = ''
+        return
+      }
+      tabDrag = { token: randomUUID(), windowId, id }
+      event.returnValue = tabDrag.token
+    })
+  sidebar.webContents.ipc.on('browser:tab-drop', (event, token: unknown, targetId: unknown) => {
+    if (
+      !isTrusted(event) ||
+      typeof token !== 'string' ||
+      typeof targetId !== 'string' ||
+      (targetId !== '' && !tabs.has(targetId)) ||
+      !tabDrag ||
+      tabDrag.token !== token
+    )
+      return
+    const drag = tabDrag
+    const transfer = tabWindows.get(drag.windowId)
+    if (!transfer) return
+    tabDrag = undefined
+    if (drag.windowId === windowId) reorderTab(drag.id, targetId)
+    else void transfer(drag.id, (tab) => receiveTab(tab, targetId))
+  })
 
   function navigate(event: IpcMainEvent, input: unknown): void {
     if (!isTrusted(event) || typeof input !== 'string' || input.length > 8192) return
@@ -931,18 +1329,67 @@ export function attachBrowser(
       } else newTab(destination)
     } else if (action === 'reorder' && typeof id === 'string' && typeof targetId === 'string')
       reorderTab(id, targetId)
+    else if (action === 'detach' && typeof id === 'string' && event.sender === sidebar.webContents)
+      void detachTab(id)
     else if (typeof id === 'string') {
       if (action === 'switch') switchTab(id, event.sender !== sidebar.webContents)
       else if (action === 'close') closeTab(id)
-      else if (action === 'mute') {
-        const tab = tabs.get(id)
-        if (tab) {
-          tab.state.muted = !tab.state.muted
-          tab.view?.webContents.setAudioMuted(tab.state.muted)
-          publish()
-        }
-      }
+      else if (action === 'split') splitTab(id)
+      else if (action === 'unsplit' && tabs.get(id)?.state.split)
+        animateLayout(() => clearSplit(id))
+      else if (action === 'mute') toggleMute(id)
     }
+  }
+  function showTabMenu(event: IpcMainEvent, id: unknown, x: unknown, y: unknown): void {
+    if (
+      !isTrusted(event) ||
+      event.sender !== sidebar.webContents ||
+      typeof id !== 'string' ||
+      typeof x !== 'number' ||
+      typeof y !== 'number' ||
+      !Number.isFinite(x) ||
+      !Number.isFinite(y)
+    )
+      return
+    const tab = tabs.get(id)
+    if (!tab) return
+    const menu = Menu.buildFromTemplate([
+      {
+        label: 'Reload tab',
+        enabled: !!tab.state.url,
+        click: () => {
+          if (tabs.has(id)) load(tab.state.url, id)
+        }
+      },
+      {
+        label: 'Duplicate tab',
+        enabled: !!tab.state.url,
+        click: () => {
+          if (tabs.has(id)) newTab(tab.state.url, false, id, !!tab.state.incognito)
+        }
+      },
+      {
+        label: tab.state.muted ? 'Unmute tab' : 'Mute tab',
+        click: () => toggleMute(id)
+      },
+      { type: 'separator' },
+      {
+        label: 'Split view with current tab',
+        enabled:
+          id !== activeTabId &&
+          canSplit(id) &&
+          canSplit(activeTabId) &&
+          tabs.get(activeTabId)?.state.split?.partnerId !== id &&
+          !!tab.state.incognito === !!tabs.get(activeTabId)?.state.incognito,
+        click: () => splitTab(id)
+      },
+      ...(tab.state.split
+        ? [{ label: 'Separate tabs', click: () => animateLayout(() => clearSplit(id)) }]
+        : []),
+      { type: 'separator' },
+      { label: 'Close tab', click: () => closeTab(id) }
+    ])
+    void contextMenu.showMenu(event.sender, menu, x, y)
   }
   function ready(event: IpcMainEvent): void {
     if (isTrusted(event)) {
@@ -955,20 +1402,28 @@ export function attachBrowser(
     'browser:activate': activate,
     'browser:overlay': overlay,
     'browser:tab': tabAction,
+    'browser:tab-menu': showTabMenu,
+    'browser:split': splitAction,
     'browser:ready': ready
   }
   for (const [channel, listener] of Object.entries(listeners)) ipcMain.on(channel, listener)
   chrome.webContents.ipc.handle('browser:suggest', suggest)
-  for (const contents of [chrome.webContents, sidebar.webContents]) {
+  for (const contents of uiContents) {
     contents.ipc.handle('browser:favicon', (event, source: unknown) => {
       if (!isTrusted(event) || typeof source !== 'string') return null
       return getFavicon(source)
     })
   }
-  keyboard(chrome.webContents)
-  keyboard(sidebar.webContents)
+  for (const contents of uiContents) keyboard(contents)
   registerTheme(chrome, false, isTrusted, applyAppearance)
   registerTheme(sidebar, true, isTrusted)
+  for (const view of [splitBar, splitDivider]) {
+    registerTheme(view, true, isTrusted, () => view.setBackgroundColor('#00000000'))
+    view.setBackgroundColor('#00000000')
+    registerPreferences(view.webContents, window, isTrusted, () => {})
+    view.webContents.on('will-navigate', (event) => event.preventDefault())
+    view.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  }
   registerSiteSearch(chrome.webContents, isTrusted, (value) => {
     search.shortcuts = value
   })
@@ -986,6 +1441,10 @@ export function attachBrowser(
     const url = new URL(chrome.webContents.getURL())
     url.hash = 'tabs'
     void sidebar.webContents.loadURL(url.href).catch(() => {})
+    url.hash = 'split'
+    void splitBar.webContents.loadURL(url.href).catch(() => {})
+    url.hash = 'split-divider'
+    void splitDivider.webContents.loadURL(url.href).catch(() => {})
     focusAddress()
   })
   const cleared = (): void => {
@@ -1065,6 +1524,7 @@ export function attachBrowser(
     })
   }
   window.on('resize', resize)
+  window.on('blur', () => finishSplitGesture(true))
   const resizeAfterFullscreen = (): void => {
     setImmediate(() => {
       if (!window.isDestroyed()) resize()
@@ -1106,9 +1566,9 @@ export function attachBrowser(
       () => tabs.get(activeTabId)?.view?.webContents
     )
     registerPreferences(contents, window, isTrusted, (value) => {
+      if (value === appliedPreferences) return
       for (const client of [
-        chrome.webContents,
-        sidebar.webContents,
+        ...uiContents,
         ...[...tabs.values()].flatMap((tab) => (tab.view ? [tab.view.webContents] : []))
       ])
         if (!client.isDestroyed())
@@ -1117,7 +1577,8 @@ export function attachBrowser(
               frame.send('keybinds:changed', value.keybindings)
               frame.send('privacy:changed', {
                 doNotTrack: value.doNotTrack,
-                globalPrivacyControl: value.globalPrivacyControl
+                globalPrivacyControl: value.globalPrivacyControl,
+                autoRejectConsent: value.autoRejectConsent
               })
             }
       if (value.searchEngine !== appliedPreferences.searchEngine) suggestionRequest?.abort()
@@ -1198,12 +1659,17 @@ export function attachBrowser(
     chrome.webContents.send('browser:topbar-hover', near)
   }, 50)
   window.on('closed', () => {
+    tabWindows.delete(windowId)
+    if (tabDrag?.windowId === windowId) tabDrag = undefined
+    const partitions = privatePartitions.get(windowId)?.() ?? new Set<string>()
+    privatePartitions.delete(windowId)
     finder.destroy()
     closeSession(windowId)
     clearInterval(sleepTimer)
     clearInterval(topbarHoverTimer)
     if (sidebarAnimation) clearInterval(sidebarAnimation)
     store.off('cleared', cleared)
+    clearInterval(layoutAnimation)
     store.off('history-changed', historyChanged)
     suggestionRequest?.abort()
     for (const [channel, listener] of Object.entries(listeners))
@@ -1211,16 +1677,16 @@ export function attachBrowser(
     for (const tab of tabs.values())
       if (tab.view && !tab.view.webContents.isDestroyed()) tab.view.webContents.close()
     snapshots.clear()
-    clearIncognitoSession()
-    if (!sidebar.webContents.isDestroyed()) sidebar.webContents.close()
-    if (!chrome.webContents.isDestroyed()) chrome.webContents.close()
+    for (const partition of partitions) clearIncognitoSession(partition)
+    for (const contents of uiContents) if (!contents.isDestroyed()) contents.close()
   })
   function memoryMode(tab: TabEntry): 'sleep' | 'discard' | undefined {
     if (
-      tab.state.id === activeTabId ||
+      visibleTab(tab.state.id) ||
       tab.state.discarded ||
       tab.state.loading ||
       tab.state.error ||
+      detachingTabs.has(tab.state.id) ||
       tab.waking ||
       !tab.view ||
       !/^https?:/.test(tab.state.url)
@@ -1363,9 +1829,32 @@ export function attachBrowser(
     }
   }, 15000)
   sleepTimer.unref()
-  const startup = startupSession(currentPreferences())
-  for (const url of startup.urls) newTab(url, true)
-  switchTab([...tabs.keys()][startup.active] ?? [...tabs.keys()][0], false)
+  tabWindows.set(windowId, transferTab)
+  if (detached) {
+    tabs.set(detached.tab.state.id, detached.tab)
+    createTabView(detached.tab)
+    switchTab(detached.tab.state.id, false)
+  } else {
+    const startup = startupSession(currentPreferences())
+    for (const url of startup.urls) newTab(url, true)
+    const ids = [...tabs.keys()]
+    for (const [left, right, ratio = 0.5] of startup.splits ?? []) {
+      const leftTab = tabs.get(ids[left])
+      const rightTab = tabs.get(ids[right])
+      if (
+        !leftTab ||
+        !rightTab ||
+        leftTab.state.split ||
+        rightTab.state.split ||
+        !canSplit(ids[left]) ||
+        !canSplit(ids[right])
+      )
+        continue
+      leftTab.state.split = { partnerId: ids[right], side: 'left', ratio }
+      rightTab.state.split = { partnerId: ids[left], side: 'right', ratio }
+    }
+    switchTab([...tabs.keys()][startup.active] ?? [...tabs.keys()][0], false)
+  }
   initializing = false
   registerLinkWindow(window, (url) => {
     const active = tabs.get(activeTabId)

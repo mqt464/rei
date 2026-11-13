@@ -81,6 +81,15 @@ export function mediaDownloadUrl(media: PlayingMedia): string {
     throw new Error('Only public HTTP(S) media addresses can be downloaded.')
   const host = page.hostname.replace(/^www\./, '')
   if (
+    (host === 'soundcloud.com' || host === 'm.soundcloud.com') &&
+    /^\/[\w-]+\/[\w-]+(?:\/s-[\w-]+)?\/?$/.test(page.pathname) &&
+    !/^\/[\w-]+\/(?:tracks|albums|sets|reposts|likes|spotlight|comments)(?:\/|$)/.test(
+      page.pathname
+    ) &&
+    page.pathname.replace(/\/$/, '') !== '/stations/track'
+  )
+    return page.origin + page.pathname + page.search
+  if (
     host === 'x.com' ||
     host === 'twitter.com' ||
     host.endsWith('.x.com') ||
@@ -127,6 +136,6 @@ export function mediaDownloadUrl(media: PlayingMedia): string {
 
 function unavailableMedia(): never {
   throw new Error(
-    'Could not identify this media’s direct link. Open its individual video page and try again.'
+    'Could not identify this media’s direct link. Open its individual video or audio page and try again.'
   )
 }

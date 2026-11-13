@@ -3,6 +3,8 @@ productName: rei
 directories:
   buildResources: build
 extraResources:
+  - from: resources/consent-o-matic/LICENSE
+    to: licenses/consent-o-matic-LICENSE
   - from: resources/commands
     to: commands
   - from: resources/extensions
@@ -10,7 +12,9 @@ extraResources:
   - from: resources/sources
     to: sources
 files:
-  - out/**
+  - out/main/**
+  - out/preload/**
+  - out/renderer/**
   - '!resources/commands/**'
   - '!resources/extensions/**'
   - '!resources/sources/**'

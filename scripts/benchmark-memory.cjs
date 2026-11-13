@@ -55,7 +55,12 @@ if (process.argv.includes('--generate-wallpaper')) {
     const result = require('node:child_process').spawnSync(
       require('electron'),
       [__filename, output, ...process.argv.slice(3)],
-      { env, stdio: 'inherit', timeout: 180000, windowsHide: true }
+      {
+        env,
+        stdio: 'inherit',
+        timeout: process.argv.includes('--real-tabs') ? 1200000 : 180000,
+        windowsHide: true
+      }
     )
     if (result.error) throw result.error
     process.exitCode = result.status ?? 1
@@ -63,7 +68,12 @@ if (process.argv.includes('--generate-wallpaper')) {
       const warm = require('node:child_process').spawnSync(
         require('electron'),
         [__filename, output.replace(/\.json$/, '-warm.json'), ...process.argv.slice(3)],
-        { env, stdio: 'inherit', timeout: 180000, windowsHide: true }
+        {
+          env,
+          stdio: 'inherit',
+          timeout: process.argv.includes('--real-tabs') ? 1200000 : 180000,
+          windowsHide: true
+        }
       )
       if (warm.error) throw warm.error
       process.exitCode = warm.status ?? 1
@@ -75,6 +85,8 @@ if (process.argv.includes('--generate-wallpaper')) {
   }
 } else {
   const { app, BaseWindow, webContents } = require('electron')
+  if (process.argv.includes('--offline'))
+    app.commandLine.appendSwitch('host-resolver-rules', 'MAP * ~NOTFOUND, EXCLUDE 127.0.0.1')
   const { createServer } = require('node:http')
   const Module = require('node:module')
   app.setPath('userData', process.env.REI_MEMORY_PROFILE)
@@ -110,6 +122,23 @@ if (process.argv.includes('--generate-wallpaper')) {
   app
     .whenReady()
     .then(async () => {
+      const memoryTrace = []
+      const traceStarted = performance.now()
+      const traceTimer = process.argv.includes('--trace-memory')
+        ? setInterval(() => {
+            const processes = app.getAppMetrics().map((metric) => ({
+              pid: metric.pid,
+              type: metric.type,
+              privateKiB: metric.memory.privateBytes ?? 0,
+              workingSetKiB: metric.memory.workingSetSize
+            }))
+            memoryTrace.push({
+              elapsedMs: performance.now() - traceStarted,
+              privateMiB: processes.reduce((sum, entry) => sum + entry.privateKiB, 0) / 1024,
+              processes
+            })
+          }, 200)
+        : undefined
       const { attachBrowser, SearchStore, ExtensionRuntime, prepareUIStorage } =
         browserModule.exports
       fs.writeFileSync(
@@ -137,7 +166,32 @@ if (process.argv.includes('--generate-wallpaper')) {
       await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
       const base = `http://127.0.0.1:${server.address().port}`
       await prepareUIStorage()
+      let profiledBackground
+      if (process.argv.includes('--profile-ublock'))
+        app.on('web-contents-created', (_event, contents) => {
+          if (contents.getType() !== 'backgroundPage') return
+          contents.once('dom-ready', () => {
+            if (
+              !contents
+                .getURL()
+                .startsWith('chrome-extension://fkgkibajhfbepljeaefdnfnegdcjomkh/') ||
+              (profiledBackground && !profiledBackground.isDestroyed())
+            )
+              return
+            profiledBackground = contents
+            contents.debugger.attach('1.3')
+            void contents.debugger.sendCommand('HeapProfiler.startSampling', {
+              samplingInterval: 32768,
+              includeObjectsCollectedByMajorGC: true,
+              includeObjectsCollectedByMinorGC: true
+            })
+          })
+        })
       const extensions = extensionsEnabled ? new ExtensionRuntime() : undefined
+      const extensionRoot = process.argv
+        .find((argument) => argument.startsWith('--extension-root='))
+        ?.slice(17)
+      if (extensions && extensionRoot) extensions.bundledPath = path.resolve(extensionRoot)
       if (extensions) await extensions.initialize()
       if (extensions)
         await waitFor(async () => {
@@ -169,6 +223,8 @@ if (process.argv.includes('--generate-wallpaper')) {
           contents.ipc.handle('extensions:get', () => ({ extensions: [], error: '' }))
       }
       const stages = []
+      const realTabObservations = []
+      let closedTabCheck
       const consoleProbes = []
       let startupMs
       let settingsOpenMs
@@ -249,7 +305,9 @@ if (process.argv.includes('--generate-wallpaper')) {
                       ? 'extension'
                       : contents.getURL().startsWith(base)
                         ? 'fixture'
-                        : 'blank'
+                        : /^https?:/.test(contents.getURL())
+                          ? 'website'
+                          : 'blank'
             }))
             samples.push({
               workingSetKiB: metrics.reduce((sum, metric) => sum + metric.memory.workingSetSize, 0),
@@ -271,6 +329,7 @@ if (process.argv.includes('--generate-wallpaper')) {
           }
           const result = {
             name,
+            elapsedMs: performance.now() - traceStarted,
             tabs: (await state()).tabs.length,
             workingSetMiB: median(samples.map((sample) => sample.workingSetKiB)) / 1024,
             privateMiB: median(samples.map((sample) => sample.privateKiB)) / 1024,
@@ -431,7 +490,168 @@ if (process.argv.includes('--generate-wallpaper')) {
           )
         }
         if (process.argv.includes('--settle')) await pause(65000)
+        if (process.argv.includes('--real-tabs')) {
+          const cycles = Number(
+            process.argv.find((argument) => argument.startsWith('--cycles='))?.slice(9) || 3
+          )
+          assert.ok(Number.isInteger(cycles) && cycles >= 1 && cycles <= 20)
+          const sites = [
+            'https://en.wikipedia.org/wiki/Memory_leak',
+            'https://x.com/NASA',
+            process.argv.find((argument) => argument.startsWith('--video-url='))?.slice(12) ||
+              'https://www.youtube.com/watch?v=aqz-KE-bpKQ'
+          ]
+          const observations = realTabObservations
+          const websiteIds = new Set()
+          await pause(15000)
+          await sample('real-baseline')
+          for (let cycle = 1; cycle <= cycles; cycle++) {
+            for (const url of sites) {
+              await addTab()
+              const contents = webContents.fromId((await state()).activeWebContentsId)
+              websiteIds.add(contents.id)
+              const failures = []
+              const failed = (_event, code, description, _url, mainFrame) => {
+                if (mainFrame) failures.push({ code, description })
+              }
+              contents.on('did-fail-load', failed)
+              await read(`window.api.navigate(${JSON.stringify(url)})`)
+              const deadline = Date.now() + 45000
+              while (contents.isLoadingMainFrame() && Date.now() < deadline) await pause(250)
+              await pause(10000)
+              let page
+              try {
+                page = await contents.executeJavaScript(
+                  `(async () => {
+                  const video = document.querySelector('video')
+                  let playError
+                  if (video) { try { await Promise.race([video.play(), new Promise((_, reject) => setTimeout(() => reject(new Error('play timed out')), 5000))]) } catch (error) { playError = error.message } }
+                  return { title: document.title, url: location.href, textLength: document.body?.innerText.length,
+                    text: document.body?.innerText.slice(0, 2000),
+                    video: video ? { paused: video.paused, time: video.currentTime, readyState: video.readyState, source: video.currentSrc, error: video.error?.message, playError } : null }
+                })()`,
+                  true
+                )
+                await pause(10000)
+                page.playback = await contents.executeJavaScript(
+                  `Array.from(document.querySelectorAll('video'), video => ({ paused: video.paused, time: video.currentTime, width: video.videoWidth, height: video.videoHeight, readyState: video.readyState }))`
+                )
+              } catch (error) {
+                page = { error: error.message }
+              }
+              contents.removeListener('did-fail-load', failed)
+              observations.push({ cycle, requested: url, failures, page })
+              console.log(
+                'Real page:',
+                JSON.stringify({
+                  cycle,
+                  requested: url,
+                  failures,
+                  title: page.title,
+                  video: page.video,
+                  playback: page.playback
+                })
+              )
+              assert.equal(failures.length, 0, 'Real page must load without main-frame errors')
+              assert.ok(page.textLength > 100, 'Real page must render content, not an empty tab')
+              if (new URL(url).hostname === 'www.youtube.com')
+                assert.ok(
+                  page.playback?.some(
+                    (video) =>
+                      !video.paused &&
+                      video.readyState >= 2 &&
+                      video.time > (page.video?.time ?? Infinity)
+                  ),
+                  'YouTube must actually play before measuring video retention'
+                )
+              await sample(`real-${cycle}-${new URL(url).hostname}`)
+              if (
+                process.argv.includes('--video-soak') &&
+                new URL(url).hostname === 'www.youtube.com'
+              ) {
+                let previousTime = page.playback[0].time
+                for (let interval = 1; interval <= 4; interval++) {
+                  await pause(30000)
+                  const playback = await contents.executeJavaScript(
+                    `Array.from(document.querySelectorAll('video'), video => ({ paused: video.paused, time: video.currentTime, width: video.videoWidth, height: video.videoHeight, readyState: video.readyState }))`
+                  )
+                  assert.ok(
+                    playback.some((video) => !video.paused && video.time > previousTime),
+                    'YouTube playback must continue throughout the soak'
+                  )
+                  previousTime = playback[0].time
+                  observations.push({ cycle, elapsedSeconds: interval * 30, playback })
+                  await sample(`video-soak-${cycle}-${interval * 30}s`)
+                }
+              }
+              if (process.argv.includes('--single-tab')) {
+                await closeExtras()
+                await waitFor(
+                  () => !webContents.fromId(contents.id),
+                  'single website WebContents destroyed'
+                )
+              }
+            }
+            await closeExtras()
+            await waitFor(
+              () => [...websiteIds].every((id) => !webContents.fromId(id)),
+              'real website WebContents destroyed'
+            )
+            await pause(15000)
+            await sample(`real-${cycle}-closed`)
+          }
+          await pause(45000)
+          await sample('real-closed-settled')
+          for (const contents of webContents.getAllWebContents()) {
+            if (!contents.getOSProcessId() || contents.debugger.isAttached()) continue
+            contents.debugger.attach('1.3')
+            try {
+              await contents.debugger.sendCommand('HeapProfiler.collectGarbage')
+            } finally {
+              contents.debugger.detach()
+            }
+          }
+          await sample('real-diagnostic-after-gc')
+          fs.mkdirSync(path.dirname(output), { recursive: true })
+          fs.writeFileSync(
+            output.replace(/\.json$/, '-pages.json'),
+            JSON.stringify(observations, null, 2)
+          )
+          const closed = stages.filter((stage) => /^real-\d+-closed$/.test(stage.name))
+          const retainedMiB = closed.at(-1).privateMiB - closed[0].privateMiB
+          closedTabCheck = {
+            cycles,
+            retainedMiB,
+            budgetMiB: 150,
+            status:
+              cycles < 3
+                ? 'insufficient-cycles'
+                : retainedMiB < 150
+                  ? 'within-budget'
+                  : 'over-budget'
+          }
+          if (cycles >= 3)
+            assert.ok(
+              retainedMiB < 150,
+              'Repeated closed-tab cycles retain over 150 MiB: investigate possible leak'
+            )
+          return
+        }
         await sample('blank-1')
+        if (process.argv.includes('--startup-only')) {
+          await pause(15000)
+          await sample('startup-idle')
+          return
+        }
+        if (profiledBackground) {
+          await pause(15000)
+          const profile = await profiledBackground.debugger.sendCommand('HeapProfiler.stopSampling')
+          profiledBackground.debugger.detach()
+          fs.mkdirSync(path.dirname(output), { recursive: true })
+          fs.writeFileSync(output.replace(/\.json$/, '-heap.json'), JSON.stringify(profile))
+          await sample('profiled-idle')
+          return
+        }
         if (process.argv.includes('--idle')) {
           await pause(15000)
           await sample('idle-15s')
@@ -571,6 +791,7 @@ if (process.argv.includes('--generate-wallpaper')) {
           }
         }
       } finally {
+        clearInterval(traceTimer)
         const wallpaperOutputs = []
         if (process.argv.includes('--wallpaper'))
           for (const [role, contents] of [
@@ -603,9 +824,27 @@ if (process.argv.includes('--generate-wallpaper')) {
                 .digest('hex'),
               baselineInternal,
               extensionsEnabled,
+              extensionRoot: extensions?.bundledPath,
+              extensionCacheSha256: extensions
+                ? require('node:crypto')
+                    .createHash('sha256')
+                    .update(
+                      fs.readFileSync(
+                        path.join(extensions.bundledPath, 'uBlock0.chromium/js/cachestorage.js')
+                      )
+                    )
+                    .digest('hex')
+                : undefined,
+              memoryTrace,
+              realTabObservations: process.argv.includes('--real-tabs')
+                ? realTabObservations
+                : undefined,
+              closedTabCheck,
               settled: process.argv.includes('--settle'),
               options: process.argv.slice(3),
-              fixture: '9 same-origin local pages, 10000 retained objects each',
+              fixture: process.argv.includes('--real-tabs')
+                ? 'Real Wikipedia, X, and YouTube pages; isolated profile'
+                : '9 same-origin local pages, 10000 retained objects each',
               startupMs,
               settingsOpenMs,
               rendererRoot,
@@ -624,8 +863,8 @@ if (process.argv.includes('--generate-wallpaper')) {
         window.destroy()
         store.close()
         await new Promise((resolve) => server.close(resolve))
+        app.quit()
       }
-      app.quit()
     })
     .catch((error) => {
       console.error(error)

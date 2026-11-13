@@ -208,7 +208,7 @@ function start(record: DownloadRecord): void {
       '--output',
       join(directory, '%(title).150B [%(id)s].%(ext)s'),
       '--format',
-      ffmpeg ? 'bv*+ba/b' : 'b',
+      ffmpeg ? 'bv*+ba/b/ba' : 'b/ba',
       '--no-js-runtimes',
       '--js-runtimes',
       `node:${globalThis.process.execPath}`,

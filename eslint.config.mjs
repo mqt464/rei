@@ -10,7 +10,8 @@ export default defineConfig(
       '**/dist',
       '**/out',
       '**/.cache',
-      'resources/extensions/uBlock0.chromium/**'
+      'resources/extensions/uBlock0.chromium/**',
+      'resources/consent-o-matic/*.js'
     ]
   },
   tseslint.configs.recommended,

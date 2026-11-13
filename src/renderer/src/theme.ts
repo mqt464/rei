@@ -17,7 +17,8 @@ let imageGeneration = 0
 let rotation: ReturnType<typeof setInterval> | undefined
 
 function syncWallpaper(value: Theme): void {
-  if (['#tabs', '#context-menu', '#find'].includes(location.hash)) return
+  if (['#tabs', '#context-menu', '#find', '#split', '#split-divider'].includes(location.hash))
+    return
   const key = wallpaperKey(value)
   if (imageKey === key) return
   imageKey = key

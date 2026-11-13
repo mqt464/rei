@@ -3,6 +3,11 @@
   import {
     ArrowLeft,
     ArrowRight,
+    Columns2,
+    Unlink,
+    Volume2,
+    VolumeX,
+    X,
     Copy,
     Download,
     ExternalLink,
@@ -48,6 +53,13 @@
   const modifier = navigator.platform.includes('Mac') ? '?' : 'Ctrl+'
 
   function iconFor(label: string): typeof Copy {
+    if (label.startsWith('Split view')) return Columns2
+    if (label === 'Separate tabs') return Unlink
+    if (label === 'Reload tab') return RotateCw
+    if (label === 'Duplicate tab') return Copy
+    if (label === 'Mute tab') return VolumeX
+    if (label === 'Unmute tab') return Volume2
+    if (label === 'Close tab') return X
     if (label.startsWith('Save')) return Download
     if (label.startsWith('Open')) return ExternalLink
     if (label.includes('image')) return Image

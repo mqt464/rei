@@ -21,6 +21,7 @@ export interface BrowserTab {
   muted?: boolean
   sleeping?: boolean
   discarded?: boolean
+  split?: { partnerId: string; side: 'left' | 'right'; ratio?: number }
 }
 
 export interface BrowserState {
@@ -31,6 +32,13 @@ export interface BrowserState {
   activeWebContentsId?: number
   controlHeld: boolean
   tabs: BrowserTab[]
+  split?: {
+    leftId: string
+    rightId: string
+    ratio: number
+    width: number
+    gesture?: 'move' | 'resize'
+  }
 }
 
 export interface SearchUpdate {
@@ -118,7 +126,17 @@ export interface BrowserAPI {
   switchTab: (id: string) => void
   closeTab: (id: string) => void
   toggleMute: (id: string) => void
+  showTabMenu: (id: string, x: number, y: number) => void
+  splitTab: (id: string) => void
+  beginSplitGesture: (id: string, kind: 'move' | 'resize') => void
+  finishSplitGesture: (cancelled?: boolean) => void
+  moveSplitPane: (id: string, side: 'left' | 'right') => void
+  resizeSplit: (id: string, ratio: number) => void
+  unsplitTab: (id: string) => void
   reorderTab: (id: string, targetId: string) => void
+  detachTab: (id: string) => void
+  startTabDrag: (id: string) => string
+  dropTab: (token: string, targetId: string) => void
   getShortcuts: (legacy?: string | null) => Promise<SearchShortcut[]>
   openShortcutsFile: () => Promise<void>
   onShortcuts: (callback: (value: SearchShortcut[]) => void) => () => void

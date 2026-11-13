@@ -356,7 +356,7 @@ async function checkPlayback(api, runtime, read, chrome, window, origin) {
   )
   assert.throws(
     () => api.mediaDownloadUrl({ ...selected, sourceUrl: 'blob:foo' }),
-    /individual video page/
+    /individual video or audio page/
   )
   chrome.focus()
   await read(

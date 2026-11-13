@@ -34,8 +34,8 @@ app.whenReady().then(async () => {
   const store = new browserModule.exports.SearchStore(':memory:')
   const window = new BaseWindow({ width: 900, height: 670, show: false })
   try {
-    Object.defineProperty(app, 'isPackaged', { value: true })
     const chrome = browserModule.exports.attachBrowser(window, store)
+    for (const view of window.contentView.children) view.webContents.setBackgroundThrottling(false)
     await chrome.loadFile(path.resolve(__dirname, '../out/renderer/index.html'))
     const sidebar = window.contentView.children[0].webContents
     await chrome.executeJavaScript(

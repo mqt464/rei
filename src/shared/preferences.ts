@@ -26,6 +26,9 @@ export interface Preferences {
   historyEnabled: boolean
   doNotTrack: boolean
   globalPrivacyControl: boolean
+  autoRejectConsent: boolean
+  cleanTrackingLinks: boolean
+  blockThirdPartyCookies: boolean
   startup: 'blank' | 'restore' | 'pages'
   startupPages: string[]
   tabSleeping: boolean
@@ -52,7 +55,10 @@ export const defaultPreferences: Preferences = {
   downloadHistory: true,
   historyEnabled: true,
   doNotTrack: false,
-  globalPrivacyControl: false,
+  globalPrivacyControl: true,
+  autoRejectConsent: true,
+  cleanTrackingLinks: true,
+  blockThirdPartyCookies: true,
   startup: 'blank',
   startupPages: [],
   tabSleeping: true,

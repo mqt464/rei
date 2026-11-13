@@ -7,6 +7,7 @@
     Download,
     HatGlasses,
     Settings,
+    Columns2,
     Volume2,
     VolumeX,
     X
@@ -67,6 +68,8 @@
     preview.classList.remove('dragging')
     preview.classList.add('tab-drag-preview')
     preview.style.width = bounds.width + 'px'
+    preview.style.left = bounds.left + 'px'
+    preview.style.top = bounds.top + 'px'
     preview.setAttribute('aria-hidden', 'true')
     row.parentElement?.appendChild(preview)
     event.dataTransfer.setDragImage(
@@ -78,7 +81,7 @@
   }
 
   function updateDropTarget(event: DragEvent): void {
-    if (!draggedTabId) return
+    if (!event.dataTransfer?.types.includes('application/x-rei-tab')) return
     event.preventDefault()
     if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
     const target = [...tabList.querySelectorAll<HTMLElement>('.vertical-tab')].find(
@@ -93,6 +96,16 @@
   function resetDrag(): void {
     draggedTabId = ''
     dropTargetTabId = null
+  }
+
+  function finishDrag(event: DragEvent): void {
+    if (
+      draggedTabId &&
+      event.dataTransfer?.dropEffect === 'none' &&
+      (event.screenX !== 0 || event.screenY !== 0)
+    )
+      window.api.detachTab(draggedTabId)
+    resetDrag()
   }
   onMount(() => {
     const audioHideTimers = new SvelteMap<string, ReturnType<typeof setTimeout>>()
@@ -179,9 +192,10 @@
     if (!event.currentTarget.contains(event.relatedTarget as Node | null)) dropTargetTabId = null
   }}
   on:drop={(event) => {
-    if (!draggedTabId) return
+    const token = event.dataTransfer?.getData('application/x-rei-tab')
+    if (!token) return
     updateDropTarget(event)
-    if (dropTargetTabId !== null) window.api.reorderTab(draggedTabId, dropTargetTabId)
+    if (dropTargetTabId !== null) window.api.dropTab(token, dropTargetTabId)
     resetDrag()
   }}
 >
@@ -226,23 +240,35 @@
             data-fluid-hover
             data-fluid-selected={activeTabId === tab.id ? '' : undefined}
             class:active={activeTabId === tab.id}
+            class:paired={!!tab.split}
+            class:pair-visible={!!tab.split &&
+              (activeTabId === tab.id || activeTabId === tab.split.partnerId)}
             class:sleeping={tab.sleeping}
             class:discarded={tab.discarded}
             class:dragging={draggedTabId === tab.id}
+            on:contextmenu={(event) => {
+              event.preventDefault()
+              window.api.showTabMenu(tab.id, event.clientX, event.clientY)
+            }}
             class:show-shortcut={controlHeld &&
               index < 9 &&
               !!$preferences.keybindings[`tab${index + 1}`]?.length}
             draggable="true"
             on:dragstart={(event) => {
+              const token = window.api.startTabDrag(tab.id)
+              if (!token) {
+                event.preventDefault()
+                return
+              }
               setTabDragImage(event, event.currentTarget)
               draggedTabId = tab.id
               dropIndicatorY =
                 event.currentTarget.getBoundingClientRect().top -
                 tabList.getBoundingClientRect().top
-              event.dataTransfer?.setData('text/plain', tab.id)
+              event.dataTransfer?.setData('application/x-rei-tab', token)
               if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move'
             }}
-            on:dragend={resetDrag}
+            on:dragend={finishDrag}
           >
             <button
               id={`tab-${tab.id}`}
@@ -252,6 +278,9 @@
               tabindex={activeTabId === tab.id ? 0 : -1}
               type="button"
               aria-label={(tab.incognito ? 'Incognito, ' : '') +
+                (tab.split
+                  ? `${tab.split.side} split pane with ${tabs.find((entry) => entry.id === tab.split?.partnerId)?.title ?? 'paired tab'}, `
+                  : '') +
                 (tab.error
                   ? `${tab.title}, error: ${tab.error}`
                   : tab.loading
@@ -263,6 +292,12 @@
                   ? `${tab.title} (sleeping)`
                   : tab.error || tab.url || tab.title}
               on:click={() => window.api.switchTab(tab.id)}
+              on:keydown={(event) => {
+                if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return
+                event.preventDefault()
+                const bounds = event.currentTarget.getBoundingClientRect()
+                window.api.showTabMenu(tab.id, bounds.left + 16, bounds.bottom)
+              }}
             >
               {#if tab.loading}
                 <span class="tab-loading" aria-label="Loading"></span>
@@ -283,6 +318,15 @@
               >
               {#if tab.incognito && (tab.loading || tab.error || tab.discarded)}
                 <HatGlasses size={13} aria-label="Incognito tab" />
+              {/if}
+              {#if tab.split}
+                <span
+                  class="split-badge"
+                  title={`${tab.split.side === 'left' ? 'Left' : 'Right'} pane with ${tabs.find((entry) => entry.id === tab.split?.partnerId)?.title ?? 'paired tab'}`}
+                >
+                  <Columns2 size={12} aria-hidden="true" />
+                  <span>{tab.split.side === 'left' ? 'L' : 'R'}</span>
+                </span>
               {/if}
             </button>
             {#if audibleTabIds.has(tab.id)}
@@ -413,6 +457,68 @@
 </aside>
 
 <style>
+  .vertical-tab.paired::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 8px;
+    bottom: 8px;
+    width: 2px;
+    border-radius: 2px;
+    background: var(--rei-muted);
+    opacity: 0.4;
+    transition: opacity var(--rei-duration-medium) ease;
+  }
+  .vertical-tab.pair-visible::before {
+    background: var(--rei-accent);
+    opacity: 1;
+  }
+  .split-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    flex-shrink: 0;
+    margin-left: auto;
+    padding: 2px 4px;
+    border-radius: 4px;
+    background: var(--rei-hover);
+    color: var(--rei-muted);
+    font-size: 9px;
+    line-height: 1;
+    animation: pair-enter var(--rei-duration-medium) cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  .pair-visible .split-badge {
+    color: var(--rei-accent);
+  }
+  :global([data-sidebar-icons='true']) .split-badge {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    padding: 1px 2px;
+    background: var(--rei-sidebar);
+  }
+  :global([data-sidebar-icons='true']) .split-badge :global(svg) {
+    display: none;
+  }
+  @keyframes pair-enter {
+    from {
+      opacity: 0;
+      transform: translateX(-4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .split-badge {
+      animation: none;
+    }
+  }
+  :global([data-motion='reduced']) .split-badge,
+  :global([data-motion='none']) .split-badge {
+    animation: none;
+  }
   .sidebar-downloads {
     position: relative;
   }

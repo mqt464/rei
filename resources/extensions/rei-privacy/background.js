@@ -1,5 +1,15 @@
 globalThis.reiDoNotTrack = false
 globalThis.reiGlobalPrivacyControl = false
+globalThis.reiCleanTrackingLinks = true
+globalThis.chrome.webRequest.onBeforeRequest.addListener(
+  (details) => {
+    if (!globalThis.reiCleanTrackingLinks || details.method !== 'GET') return
+    const cleaned = globalThis.reiCleanTrackingUrl?.(details.url) ?? details.url
+    if (cleaned !== details.url) return { redirectUrl: cleaned }
+  },
+  { urls: ['http://*/*', 'https://*/*'], types: ['main_frame', 'sub_frame'] },
+  ['blocking']
+)
 globalThis.chrome.webRequest.onBeforeSendHeaders.addListener(
   (details) => {
     if (!globalThis.reiDoNotTrack && !globalThis.reiGlobalPrivacyControl) return

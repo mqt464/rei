@@ -219,7 +219,7 @@ app.whenReady().then(async () => {
     await waitFor(
       () =>
         read(
-          'document.querySelector(".history-status")?.textContent === "Link copied." || !!document.querySelector(".history-error")'
+          '(document.querySelector(".history-status [torph-sr]") ?? document.querySelector(".history-status"))?.textContent === "Link copied." || !!document.querySelector(".history-error")'
         ),
       'copy completes'
     )

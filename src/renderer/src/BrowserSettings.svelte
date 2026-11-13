@@ -49,6 +49,19 @@
     },
     { key: 'spellcheck', title: 'Check spelling' }
   ] as const
+  const privacySwitches = [
+    {
+      key: 'autoRejectConsent',
+      title: 'Reject optional cookies',
+      description: 'On supported sites.'
+    },
+    { key: 'cleanTrackingLinks', title: 'Remove tracking from links', description: '' },
+    {
+      key: 'blockThirdPartyCookies',
+      title: 'Block third-party cookies',
+      description: 'Requires restart.'
+    }
+  ] as const
   async function chooseFolder(): Promise<void> {
     choosingFolder = true
     try {
@@ -192,9 +205,21 @@
         on:change={(event) => updatePreferences({ historyEnabled: event.detail })}
       /></SettingRow
     >
+  </Card>
+  <Card>
+    {#each privacySwitches as setting (setting.key)}
+      <SettingRow title={setting.title} description={setting.description} control={setting.key}>
+        <Switch
+          id={setting.key}
+          label={setting.title}
+          checked={$preferences[setting.key]}
+          on:change={(event) => updatePreferences({ [setting.key]: event.detail })}
+        />
+      </SettingRow>
+    {/each}
     <SettingRow
       title="Do not sell or share my data"
-      description="Sends Global Privacy Control (GPC) to websites."
+      description="Sends Global Privacy Control (GPC)."
       control="global-privacy-control"
       ><Switch
         id="global-privacy-control"

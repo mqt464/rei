@@ -140,6 +140,7 @@ app.whenReady().then(async () => {
         'System appearance',
         'Surfaces',
         'Text & accents',
+        'Text morphing',
         'Typography',
         'Website typography',
         'Layout',
@@ -405,7 +406,10 @@ app.whenReady().then(async () => {
         read('document.querySelector("#clear-search-data").getAttribute("aria-busy") !== "true"'),
       'cancel must reset clear button'
     )
-    assert.equal(await read('document.querySelector(".feedback").textContent'), '')
+    assert.equal(
+      await read('document.querySelector(".feedback").textContent.replace(/\\u200b/g, "")'),
+      ''
+    )
     await read('document.querySelector("#clear-search-data").click()')
     await waitFor(
       () => read('document.querySelector(".feedback").textContent.includes("cleared")'),
@@ -463,10 +467,11 @@ app.whenReady().then(async () => {
           'all dropdowns must use shared custom controls'
         )
         if (section === 'browser')
-          assert.equal(
-            await read('document.querySelectorAll(".settings-content .rei-description").length'),
-            0,
-            'browsing must not show redundant descriptions'
+          assert.ok(
+            await read(
+              'Array.from(document.querySelectorAll(".settings-content .rei-description"), element => element.textContent.trim()).every(description => description.length <= 48)'
+            ),
+            'browser settings must keep descriptions short'
           )
         assert.equal(
           await read(

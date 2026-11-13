@@ -65,6 +65,7 @@ app.whenReady().then(async () => {
     )
     const state = () => chrome.executeJavaScript('window.fullscreenState')
     await waitFor(async () => (await state())?.activeTabId, 'initial tab must load')
+    await chrome.executeJavaScript('window.api.setPreferences({autoHideTopbar:false})')
     await chrome.executeJavaScript(
       `window.api.navigate('http://127.0.0.1:${server.address().port}/')`
     )

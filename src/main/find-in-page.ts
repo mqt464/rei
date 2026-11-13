@@ -20,12 +20,12 @@ export class PageFinder {
     private registerKeyboard: (contents: WebContents) => void
   ) {}
 
-  resize(left: number, top: number): void {
+  resize(left: number, top: number, right = this.window.getContentBounds().width): void {
     if (!this.view || this.window.isDestroyed()) return
-    const { width, height } = this.window.getContentBounds()
-    const panelWidth = Math.min(380, Math.max(0, width - left))
+    const { height } = this.window.getContentBounds()
+    const panelWidth = Math.min(380, Math.max(0, right - left))
     this.view.setBounds({
-      x: width - panelWidth,
+      x: right - panelWidth,
       y: top,
       width: panelWidth,
       height: Math.max(0, Math.min(64, height - top))

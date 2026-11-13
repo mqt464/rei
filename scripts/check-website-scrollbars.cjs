@@ -206,6 +206,39 @@ async function main() {
       features: [{ name: 'forced-colors', value: 'active' }]
     })
     assert.notEqual(await read('html', '::-webkit-scrollbar', 'width'), '6px')
+    await contents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [] })
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    await contents.debugger.sendCommand('HeapProfiler.collectGarbage')
+    const beforeRemoval = await contents.debugger.sendCommand('Memory.getDOMCounters')
+    const beforeHeap = await contents.debugger.sendCommand('Runtime.getHeapUsage')
+    await contents.executeJavaScript(`(() => {
+      const children = '<span>detached scrollbar content</span>'.repeat(500)
+      for (let index = 0; index < 100; index++) {
+        const scroller = document.createElement('div')
+        scroller.style.cssText = 'overflow:auto;height:10px;scrollbar-color:rgb(1,2,3) rgb(4,5,6)'
+        scroller.innerHTML = children
+        document.body.append(scroller)
+        scroller.dispatchEvent(new Event('scroll'))
+        if (!scroller.hasAttribute('data-rei-scrollbar-colors')) throw new Error('Scrollbar retention fixture was not registered')
+        scroller.remove()
+      }
+    })()`)
+    await new Promise((resolve) => setTimeout(resolve, 2300))
+    await contents.debugger.sendCommand('HeapProfiler.collectGarbage')
+    const afterRemoval = await contents.debugger.sendCommand('Memory.getDOMCounters')
+    const afterHeap = await contents.debugger.sendCommand('Runtime.getHeapUsage')
+    console.log(
+      'Removed scrollbar subtrees:',
+      JSON.stringify({
+        retainedNodes: afterRemoval.nodes - beforeRemoval.nodes,
+        retainedHeapBytes: afterHeap.usedSize - beforeHeap.usedSize,
+        retainedDOMBytes: afterHeap.embedderHeapUsedSize - beforeHeap.embedderHeapUsedSize
+      })
+    )
+    assert.ok(
+      afterRemoval.nodes - beforeRemoval.nodes < 1000,
+      'Removed custom-colored scrollers must not retain detached DOM subtrees'
+    )
     contents.debugger.detach()
     await window.loadURL(url + '/next')
     await apply()

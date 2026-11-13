@@ -34,6 +34,7 @@ const context = vm.createContext({
     if (name === './extension-compatibility') return { installExtensionCompatibility: noop }
     if (name === './extension-proxy') return { ExtensionProxy: class {} }
     if (name === '../shared/extension-permissions') return {}
+    if (name === '../shared/privacy') return { cleanTrackingUrl: (value) => value }
     return require(name)
   }
 })

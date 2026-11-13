@@ -65,12 +65,79 @@ listeners.get('pause')({ type: 'pause', target: media })
 assert.equal(sent.at(-1).sourceUrl, playlist, 'paused playback retains its last media source')
 
 const api = load('src/main/playing-media.ts', { require }).exports
+const soundcloudTrack = 'https://soundcloud.com/artist/track?secret_token=s-secret'
+for (const sourceUrl of ['blob:https://soundcloud.com/playing', '', 'https://cdn.example/stream']) {
+  assert.equal(api.mediaDownloadUrl({ url: soundcloudTrack, sourceUrl }), soundcloudTrack)
+}
+assert.equal(
+  api.mediaDownloadUrl({
+    url: 'https://m.soundcloud.com/artist/track/s-secret',
+    sourceUrl: 'blob:playing'
+  }),
+  'https://m.soundcloud.com/artist/track/s-secret'
+)
+for (const url of [
+  'https://soundcloud.com/discover',
+  'https://soundcloud.com/you/likes',
+  'https://soundcloud.com/artist/tracks',
+  'https://soundcloud.com/artist/sets',
+  'https://soundcloud.com/stations/track',
+  'https://soundcloud.com/artist/sets/playlist',
+  'https://soundcloud.com.evil.example/artist/track'
+]) {
+  assert.throws(
+    () => api.mediaDownloadUrl({ url, sourceUrl: 'blob:playing' }),
+    /Could not identify/
+  )
+}
+assert.equal(
+  api.mediaDownloadUrl({
+    url: 'https://example.com/audio',
+    sourceUrl: 'https://cdn.example/audio.mp3'
+  }),
+  'https://cdn.example/audio.mp3',
+  'generic direct audio downloads still work'
+)
 assert.equal(
   api.mediaDownloadUrl(sent.at(-1)),
   playlist,
   'X download uses detected media rather than a post without video'
 )
 const contents = new EventEmitter()
+const soundcloudListeners = new Map()
+const soundcloudLocation = {
+  href: 'https://soundcloud.com/discover',
+  hostname: 'soundcloud.com',
+  origin: 'https://soundcloud.com'
+}
+let playerLink = soundcloudTrack
+load('src/preload/playing-media.ts', {
+  require: () => ({ ipcRenderer: { send: (_channel, value) => sent.push(value) } }),
+  HTMLMediaElement: Media,
+  HTMLVideoElement: Media,
+  location: soundcloudLocation,
+  document: { title: 'SoundCloud', querySelector: () => playerLink && { href: playerLink } },
+  window: { addEventListener: (event, callback) => soundcloudListeners.set(event, callback) }
+})
+const audio = new Media()
+audio.currentSrc = 'blob:https://soundcloud.com/playing'
+soundcloudListeners.get('play')({ type: 'play', target: audio })
+assert.equal(
+  sent.at(-1).url,
+  soundcloudTrack,
+  'SoundCloud feed playback identifies the active track'
+)
+playerLink = 'https://evil.example/artist/track'
+soundcloudListeners.get('play')({ type: 'play', target: audio })
+assert.equal(sent.at(-1).url, soundcloudLocation.href, 'cross-origin player links are ignored')
+playerLink = ''
+soundcloudLocation.href = soundcloudTrack
+soundcloudListeners.get('play')({ type: 'play', target: audio })
+assert.equal(sent.at(-1).url, soundcloudTrack, 'track pages work without a persistent player link')
+audio.paused = true
+playerLink = 'https://soundcloud.com/other/track'
+soundcloudListeners.get('pause')({ type: 'pause', target: audio })
+assert.equal(sent.at(-1).url, soundcloudTrack, 'paused playback retains the track')
 contents.ipc = new EventEmitter()
 contents.mainFrame = { framesInSubtree: [{ frameTreeNodeId: 1 }] }
 api.registerPlayingMedia(contents)
@@ -98,5 +165,64 @@ assert.equal(
   'when nothing plays, use the most recently played media'
 )
 console.log(
-  'PASS: X media source matching, paused source retention, playing priority, last-played fallback'
+  'PASS: SoundCloud track routing, X media source matching, paused retention, playing priority'
 )
+
+async function checkDownloadFormats() {
+  for (const ffmpeg of [false, true]) {
+    const spawned = []
+    const queued = []
+    const app = new EventEmitter()
+    app.getPath = () => path.resolve('mock-downloads')
+    const child = new EventEmitter()
+    child.stdout = new EventEmitter()
+    child.stderr = new EventEmitter()
+    child.stdout.setEncoding = () => child.stdout
+    child.stderr.setEncoding = () => child.stderr
+    const downloader = load('src/main/media-downloads.ts', {
+      process,
+      AbortController,
+      require: (name) => {
+        if (name === 'electron') return { app }
+        if (name === 'node:fs')
+          return {
+            existsSync: (filename) => path.basename(filename).startsWith('yt-dlp') || ffmpeg
+          }
+        if (name === 'node:fs/promises') return { mkdir: async () => {} }
+        if (name === 'node:child_process')
+          return {
+            spawn: (_engine, args) => {
+              spawned.push(args)
+              return child
+            }
+          }
+        if (name === './preferences') return { currentPreferences: () => ({}) }
+        if (name === './downloads')
+          return {
+            queuedDownload: (record) => queued.push(record),
+            updateQueuedDownload: (record) => assert.ok(queued.includes(record))
+          }
+        if (name === './playing-media') return api
+        return require(name)
+      }
+    }).exports
+    downloader.enqueueMediaDownload({
+      id: 'audio',
+      title: 'SoundCloud audio',
+      url: soundcloudTrack,
+      sourceUrl: 'blob:playing'
+    })
+    await new Promise(setImmediate)
+    assert.equal(spawned.length, 1, 'SoundCloud blob playback reaches the download engine')
+    const args = spawned[0]
+    assert.equal(args.at(-1), soundcloudTrack)
+    assert.equal(args[args.indexOf('--format') + 1], ffmpeg ? 'bv*+ba/b/ba' : 'b/ba')
+    child.emit('close', 1)
+    assert.equal(queued[0].status, 'interrupted', 'engine errors still reach the download queue')
+  }
+  console.log('PASS: audio-only format fallback with and without FFmpeg')
+}
+checkDownloadFormats().catch((error) => {
+  console.error(error)
+  process.exitCode = 1
+})

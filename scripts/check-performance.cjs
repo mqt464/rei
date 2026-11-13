@@ -383,7 +383,7 @@ if (!process.versions.electron) {
             )
             assert.equal(
               await read(
-                `document.querySelector('output[for="tab-${mode}-minutes"]').textContent.trim()`
+                `(() => { const output = document.querySelector('output[for="tab-${mode}-minutes"]'); return (output.querySelector('[torph-sr]') ?? output).textContent.trim() })()`
               ),
               label
             )

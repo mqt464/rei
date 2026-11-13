@@ -60,6 +60,11 @@ function capture(event: Event): void {
   lastUpdate = Date.now()
   let pageUrl = location.href
   const host = location.hostname.replace(/^www\./, '')
+  if (host === 'soundcloud.com' || host === 'm.soundcloud.com') {
+    const link = document.querySelector<HTMLAnchorElement>('a.playbackSoundBadge__titleLink[href]')
+    if (link && URL.canParse(link.href) && new URL(link.href).origin === location.origin)
+      pageUrl = link.href
+  }
   if (
     ['x.com', 'twitter.com', 'tiktok.com'].some(
       (site) => host === site || host.endsWith(`.${site}`)
